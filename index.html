@@ -46,12 +46,16 @@
       const [newFriendName, setNewFriendName] = useState('');
       
       // PC版ではアクティブな「ルーム（個人 or グループ）」を保持する
-      // { type: 'direct', id: '相手の名前', name: '相手の名前' } or { type: 'group', id: 'group_123', name: 'グループ名' }
       const [activeRoom, setActiveRoom] = useState(null);
       
       const [chats, setChats] = useState([]);
       const [messageInput, setMessageInput] = useState('');
       const [isUploading, setIsUploading] = useState(false);
+
+      // --- 通知ステータス ---
+      const [notificationPermission, setNotificationPermission] = useState(
+        'Notification' in window ? Notification.permission : 'default'
+      );
 
       // --- モーダル State ---
       const [friendToDelete, setFriendToDelete] = useState(null);
@@ -118,7 +122,7 @@
         const messageChannel = supabase.channel('public:global_messages')
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
             const newMsg = payload.new;
-            if (newMsg.sender === username) return;
+            if (newMsg.sender === username) return; // 自分のメッセージは無視
 
             let isRelated = false;
             let isCurrentRoom = false;
@@ -150,14 +154,25 @@
 
             // 関係あれば処理
             if (isRelated) {
-               if (isCurrentRoom) {
-                  // 現在開いているチャットなら画面に追加
+               // 画面が開いていて、アクティブなタブであるか判定
+               const isVisibleAndCurrent = isCurrentRoom && document.visibilityState === 'visible';
+
+               if (isVisibleAndCurrent) {
+                  // 現在開いているチャットなら画面に追加するだけ
                   setChats(prev => {
                     if (prev.find(m => m.id === newMsg.id)) return prev;
                     return [...prev, newMsg];
                   });
                } else {
-                  // 別画面なら通知を出す
+                  // 現在開いているチャットでも裏画面にいる場合は画面に追加
+                  if (isCurrentRoom) {
+                    setChats(prev => {
+                      if (prev.find(m => m.id === newMsg.id)) return prev;
+                      return [...prev, newMsg];
+                    });
+                  }
+
+                  // 別画面、または別タブを見ているなら通知を出す
                   if ('Notification' in window && Notification.permission === 'granted') {
                      const notificationText = newMsg.image_url ? "画像を送信しました📷" : newMsg.text;
                      
@@ -168,10 +183,25 @@
                          title = `${newMsg.sender} (${groupName})`;
                      }
                      
-                     new Notification(title, {
+                     const notification = new Notification(title, {
                         body: notificationText,
-                        icon: "https://cdn-icons-png.flaticon.com/512/3114/3114810.png"
+                        icon: "https://cdn-icons-png.flaticon.com/512/3114/3114810.png" // LINE風アイコン
                      });
+
+                     // 通知をクリックしたときの処理
+                     notification.onclick = () => {
+                        window.focus(); // タブをアクティブにする
+                        
+                        // 該当のトークルームを開く
+                        if (newMsg.room_name.startsWith('group_')) {
+                           const group = groupsRef.current.find(g => g.id === newMsg.room_name);
+                           if (group) setActiveRoom({ type: 'group', id: group.id, name: group.name });
+                        } else {
+                           // 個人チャット
+                           const otherUser = newMsg.room_name.split('_').find(u => u !== username);
+                           if (otherUser) setActiveRoom({ type: 'direct', id: otherUser, name: otherUser });
+                        }
+                     };
                   }
                }
             }
@@ -220,10 +250,6 @@
         setErrorMsg('');
 
         try {
-          if ('Notification' in window && Notification.permission !== 'granted' && Notification.permission !== 'denied') {
-            Notification.requestPermission();
-          }
-
           const { data, error } = await supabase.from('users').select('friends').eq('username', name).single();
 
           if (error && error.code === 'PGRST116') {
@@ -262,6 +288,23 @@
         setGroups([]);
         setChats([]);
         setActiveRoom(null);
+      };
+
+      // 通知の許可をリクエストする
+      const handleRequestNotification = async () => {
+        if (!('Notification' in window)) {
+          alert("このブラウザは通知機能に対応していません。");
+          return;
+        }
+        
+        const permission = await Notification.requestPermission();
+        setNotificationPermission(permission);
+        
+        if (permission === 'granted') {
+          alert("通知がONになりました！メッセージが届くとお知らせします。");
+        } else if (permission === 'denied') {
+          alert("通知が拒否されました。ブラウザの設定から許可してください。");
+        }
       };
 
       const handleAddFriend = async (e) => {
@@ -324,7 +367,7 @@
 
         } catch (error) {
            console.error("グループ作成エラー", error);
-           alert("グループの作成に失敗しました。SQLでのテーブル作成は完了していますか？");
+           alert("グループの作成に失敗しました。");
         } finally {
           setIsLoading(false);
         }
@@ -488,11 +531,33 @@
                   <span className="text-[11px] text-gray-400">ログイン中</span>
                 </div>
               </div>
-              <div className="flex space-x-3 text-gray-400">
-                {'Notification' in window && Notification.permission === 'granted' && (
-                  <i className="fa-regular fa-bell text-sm" title="通知ON"></i>
-                )}
-                <button onClick={handleLogout} className="hover:text-gray-700 transition" title="ログアウト">
+              <div className="flex space-x-4 items-center">
+                
+                {/* 🔔通知ボタン */}
+                <button 
+                  onClick={handleRequestNotification} 
+                  className={`transition text-lg flex items-center justify-center w-8 h-8 rounded-full ${
+                    notificationPermission === 'granted' 
+                      ? 'text-[#06C755] hover:bg-[#06C755]/10' 
+                      : 'text-gray-400 hover:bg-gray-200 hover:text-gray-600'
+                  }`}
+                  title={notificationPermission === 'granted' ? "通知はONになっています" : "クリックして通知をONにする"}
+                >
+                  {notificationPermission === 'granted' ? (
+                    <i className="fa-solid fa-bell"></i>
+                  ) : notificationPermission === 'denied' ? (
+                    <i className="fa-solid fa-bell-slash text-red-400"></i>
+                  ) : (
+                    <i className="fa-regular fa-bell"></i>
+                  )}
+                </button>
+
+                {/* 🚪ログアウトボタン */}
+                <button 
+                  onClick={handleLogout} 
+                  className="text-gray-400 hover:text-gray-600 hover:bg-gray-200 w-8 h-8 rounded-full flex items-center justify-center transition text-lg" 
+                  title="ログアウト"
+                >
                   <i className="fa-solid fa-arrow-right-from-bracket"></i>
                 </button>
               </div>
