@@ -27,7 +27,7 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
-    // 教えていただいた正しいSupabaseのURLとキー（anonキー）を反映しました！
+    // Supabaseの設定
     const SUPABASE_URL = "https://esmxetaqzojcitpnmbws.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVzbXhldGFxem9qY2l0cG5tYndzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMyMDM2ODIsImV4cCI6MjA4ODc3OTY4Mn0.Bq9lgljH0-1nynLi6IEa_Jkz8sNPIYozjXIknznK-Rs";
     
@@ -50,6 +50,9 @@
       const [chats, setChats] = useState([]);
       const [messageInput, setMessageInput] = useState('');
       const [isUploading, setIsUploading] = useState(false);
+
+      // 削除確認用モーダルのState
+      const [friendToDelete, setFriendToDelete] = useState(null);
 
       const messagesEndRef = useRef(null);
       const fileInputRef = useRef(null);
@@ -104,7 +107,6 @@
       // スクロール処理
       useEffect(() => {
         if (currentView === 'chat') {
-          // 画像の読み込み完了を待たずにスクロールするのを防ぐため、少し遅延させる
           setTimeout(() => {
             messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
           }, 100);
@@ -141,7 +143,7 @@
           setIsLoggedIn(true);
         } catch (err) {
           console.error(err);
-          setErrorMsg("ログインに失敗しました。SQLでのテーブル作成は完了していますか？(もしエラーが続く場合、キーが間違っている可能性があります)");
+          setErrorMsg("ログインに失敗しました。SQLでのテーブル作成は完了していますか？");
         } finally {
           setIsLoading(false);
         }
@@ -158,14 +160,37 @@
         }
       };
 
+      // 友達削除処理
+      const handleRemoveFriend = async () => {
+        if (!friendToDelete) return;
+        
+        const newFriends = friends.filter(f => f !== friendToDelete);
+        setFriends(newFriends);
+        
+        if (activeFriend === friendToDelete) {
+          setCurrentView('home');
+          setActiveFriend(null);
+        }
+        
+        setFriendToDelete(null);
+
+        try {
+          await supabase.from('users').update({ friends: newFriends }).eq('username', username);
+        } catch (error) {
+          console.error("友達の削除に失敗しました", error);
+        }
+      };
+
       const openChat = (friendName) => {
         setActiveFriend(friendName);
         setCurrentView('chat');
+        setErrorMsg(''); // エラーメッセージをクリア
       };
 
       const backToHome = () => {
         setCurrentView('home');
         setActiveFriend(null);
+        setErrorMsg(''); // エラーメッセージをクリア
       };
 
       // テキストメッセージ送信
@@ -182,7 +207,7 @@
           room_name: roomName,
           sender: username,
           text: messageInput.trim(),
-          image_url: null, // テキストなので画像なし
+          image_url: null,
           time: timeString,
         };
 
@@ -203,51 +228,64 @@
         if (!file) return;
 
         setIsUploading(true);
+        setErrorMsg(''); // アップロード開始時にエラーをリセット
+        
         try {
-          // 1. Storageに画像をアップロード
           const fileExt = file.name.split('.').pop();
-          const fileName = `${username}_${Date.now()}.${fileExt}`;
-          const roomName = [username, activeFriend].sort().join('_');
-          const filePath = `${roomName}/${fileName}`; // トークルームごとにフォルダ分け
+          
+          // 【修正ポイント】ファイル名やフォルダ名に日本語が混ざるとエラーになるため、
+          // ランダムな英数字の文字列を生成してファイル名にします。
+          const randomString = Math.random().toString(36).substring(2, 12);
+          const fileName = `${Date.now()}_${randomString}.${fileExt}`;
+          
+          // フォルダ分けをせず、直接保存します（日本語のトークルーム名によるエラー回避のため）
+          const filePath = `${fileName}`;
 
-          const { error: uploadError } = await supabase.storage
+          console.log("アップロード開始:", filePath);
+
+          const { data: uploadData, error: uploadError } = await supabase.storage
             .from('chat-images')
             .upload(filePath, file);
 
-          if (uploadError) throw uploadError;
+          if (uploadError) {
+             console.error("Storage Error Detail:", uploadError);
+             throw new Error(uploadError.message || "アップロードに失敗しました");
+          }
 
-          // 2. 画像の公開URLを取得
           const { data: publicUrlData } = supabase.storage
             .from('chat-images')
             .getPublicUrl(filePath);
 
           const imageUrl = publicUrlData.publicUrl;
 
-          // 3. メッセージとしてDBに保存
           const now = new Date();
           const timeString = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
           const msgId = username + '_' + Date.now();
+          const roomName = [username, activeFriend].sort().join('_');
 
           const newMessage = {
             id: msgId,
             room_name: roomName,
             sender: username,
-            text: null, // 画像なのでテキストなし
+            text: null,
             image_url: imageUrl,
             time: timeString,
           };
 
-          setChats(prev => [...prev, newMessage]); // 画面に即反映
+          setChats(prev => [...prev, newMessage]);
 
           const { error: dbError } = await supabase.from('messages').insert([newMessage]);
-          if (dbError) throw dbError;
+          if (dbError) {
+             throw new Error("データベース保存エラー: " + dbError.message);
+          }
 
         } catch (error) {
-          console.error("画像送信エラー:", error);
-          alert("画像の送信に失敗しました。SQLでのStorage設定が完了しているか確認してください。");
+          console.error("画像送信エラー全体:", error);
+          // エラーの具体的な理由を画面上部に表示するようにしました
+          setErrorMsg(`画像送信エラー: ${error.message}`);
         } finally {
           setIsUploading(false);
-          if (fileInputRef.current) fileInputRef.current.value = ''; // 入力をリセット
+          if (fileInputRef.current) fileInputRef.current.value = '';
         }
       };
 
@@ -271,7 +309,7 @@
               <h1 className="text-2xl font-bold text-center mb-6 text-gray-800">ようこそ</h1>
               
               {errorMsg && (
-                  <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4 text-sm">
+                  <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4 text-sm break-words">
                       {errorMsg}
                   </div>
               )}
@@ -310,7 +348,7 @@
             
             {/* ホーム画面 */}
             {currentView === 'home' && (
-              <div className="flex flex-col h-full bg-white">
+              <div className="flex flex-col h-full bg-white relative">
                 <header className="bg-white border-b border-gray-200 px-4 py-4 sticky top-0 z-10">
                   <h1 className="text-xl font-bold text-gray-800">ホーム</h1>
                 </header>
@@ -357,10 +395,10 @@
                     ) : (
                       <ul className="space-y-1">
                         {friends.map((friend, index) => (
-                          <li key={index}>
+                          <li key={index} className="flex items-center">
                             <button
                               onClick={() => openChat(friend)}
-                              className="w-full flex items-center p-3 rounded-xl hover:bg-gray-100 transition duration-150 text-left space-x-4"
+                              className="flex-1 flex items-center p-3 rounded-xl hover:bg-gray-100 transition duration-150 text-left space-x-4"
                             >
                               <div className="bg-blue-100 w-10 h-10 rounded-full flex items-center justify-center text-blue-500">
                                 <i className="fa-solid fa-user text-xl"></i>
@@ -368,6 +406,13 @@
                               <span className="text-gray-800 font-medium text-lg flex-1">
                                 {friend}
                               </span>
+                            </button>
+                            <button
+                              onClick={() => setFriendToDelete(friend)}
+                              className="p-3 ml-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition duration-150 flex-shrink-0"
+                              title={`${friend}さんを削除`}
+                            >
+                              <i className="fa-solid fa-user-minus"></i>
                             </button>
                           </li>
                         ))}
@@ -381,7 +426,7 @@
             {/* トーク画面 */}
             {currentView === 'chat' && (
               <div className="flex flex-col h-full bg-[#7494C0]">
-                <header className="bg-white/95 backdrop-blur-sm px-2 py-3 flex items-center shadow-sm sticky top-0 z-10">
+                <header className="bg-white/95 backdrop-blur-sm px-2 py-3 flex items-center shadow-sm sticky top-0 z-10 relative">
                   <button
                     onClick={backToHome}
                     className="p-2 text-gray-600 hover:bg-gray-100 rounded-full transition w-10 h-10 flex items-center justify-center"
@@ -389,6 +434,13 @@
                     <i className="fa-solid fa-chevron-left text-xl"></i>
                   </button>
                   <h1 className="text-lg font-bold text-gray-800 ml-2">{activeFriend}</h1>
+                  
+                  {/* 画像送信エラーが出た場合、画面上部に表示 */}
+                  {errorMsg && (
+                    <div className="absolute top-14 left-2 right-2 bg-red-100 border border-red-400 text-red-700 px-3 py-2 rounded text-xs shadow-md z-20 break-words">
+                      {errorMsg}
+                    </div>
+                  )}
                 </header>
 
                 <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -487,6 +539,35 @@
                 </div>
               </div>
             )}
+
+            {/* 削除確認用オーバーレイ（モーダル） */}
+            {friendToDelete && (
+              <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+                <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl animate-[fadeIn_0.2s_ease-out]">
+                  <h3 className="text-lg font-bold text-gray-800 mb-2 flex items-center text-red-500">
+                    <i className="fa-solid fa-triangle-exclamation mr-2"></i>確認
+                  </h3>
+                  <p className="text-gray-600 mb-6 text-sm leading-relaxed">
+                    「<span className="font-bold text-gray-800">{friendToDelete}</span>」さんを友達リストから削除しますか？<br/>
+                    <span className="text-xs text-gray-400 block mt-2">※過去のトーク履歴は消えません。</span>
+                  </p>
+                  <div className="flex justify-end space-x-3">
+                    <button
+                      onClick={() => setFriendToDelete(null)}
+                      className="px-4 py-2 rounded-xl text-gray-600 font-medium hover:bg-gray-100 transition"
+                    >
+                      キャンセル
+                    </button>
+                    <button
+                      onClick={handleRemoveFriend}
+                      className="px-4 py-2 rounded-xl bg-red-500 text-white font-medium hover:bg-red-600 transition flex items-center"
+                    >
+                      <i className="fa-solid fa-user-minus mr-2"></i>削除する
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       );
@@ -495,5 +576,13 @@
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<App />);
   </script>
+
+  <style>
+    /* モーダル用の簡単なフェードインアニメーション */
+    @keyframes fadeIn {
+      from { opacity: 0; transform: scale(0.95); }
+      to { opacity: 1; transform: scale(1); }
+    }
+  </style>
 </body>
 </html>
