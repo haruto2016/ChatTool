@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LINE風チャットアプリ</title>
+  <title>PC版 チャットアプリ</title>
   
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -21,7 +21,7 @@
   <!-- Supabase SDK -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
-<body>
+<body class="bg-gray-100 overflow-hidden">
   <div id="root"></div>
 
   <script type="text/babel">
@@ -30,40 +30,45 @@
     // Supabaseの設定
     const SUPABASE_URL = "https://esmxetaqzojcitpnmbws.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVzbXhldGFxem9qY2l0cG5tYndzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMyMDM2ODIsImV4cCI6MjA4ODc3OTY4Mn0.Bq9lgljH0-1nynLi6IEa_Jkz8sNPIYozjXIknznK-Rs";
-    
-    // Supabaseクライアントの作成
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
     function App() {
-      // --- State ---
+      // --- ログイン関連 State ---
       const [username, setUsername] = useState('');
       const [isLoggedIn, setIsLoggedIn] = useState(false);
       const [isLoading, setIsLoading] = useState(false);
-      const [isCheckingLogin, setIsCheckingLogin] = useState(true); // 自動ログイン確認中の状態
+      const [isCheckingLogin, setIsCheckingLogin] = useState(true);
       const [errorMsg, setErrorMsg] = useState('');
       
+      // --- データ State ---
       const [friends, setFriends] = useState([]);
+      const [groups, setGroups] = useState([]);
       const [newFriendName, setNewFriendName] = useState('');
       
-      const [currentView, setCurrentView] = useState('home');
-      const [activeFriend, setActiveFriend] = useState(null);
+      // PC版ではアクティブな「ルーム（個人 or グループ）」を保持する
+      // { type: 'direct', id: '相手の名前', name: '相手の名前' } or { type: 'group', id: 'group_123', name: 'グループ名' }
+      const [activeRoom, setActiveRoom] = useState(null);
       
       const [chats, setChats] = useState([]);
       const [messageInput, setMessageInput] = useState('');
       const [isUploading, setIsUploading] = useState(false);
 
+      // --- モーダル State ---
       const [friendToDelete, setFriendToDelete] = useState(null);
+      const [isCreatingGroup, setIsCreatingGroup] = useState(false);
+      const [newGroupName, setNewGroupName] = useState('');
+      const [selectedFriends, setSelectedFriends] = useState([]);
 
       const messagesEndRef = useRef(null);
       const fileInputRef = useRef(null);
 
-      const currentViewRef = useRef(currentView);
-      const activeFriendRef = useRef(activeFriend);
+      // 通知等の判定用にRefを使用
+      const activeRoomRef = useRef(activeRoom);
+      const groupsRef = useRef(groups);
+      useEffect(() => { activeRoomRef.current = activeRoom; }, [activeRoom]);
+      useEffect(() => { groupsRef.current = groups; }, [groups]);
 
-      useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
-      useEffect(() => { activeFriendRef.current = activeFriend; }, [activeFriend]);
-
-      // --- 初回起動時：自動ログインの確認 ---
+      // --- 初回起動時：自動ログイン ---
       useEffect(() => {
         const checkAutoLogin = async () => {
           const savedUsername = localStorage.getItem('chat_username');
@@ -76,13 +81,18 @@
         checkAutoLogin();
       }, []);
 
-
       // --- データベースから情報をリアルタイムで読み込む ---
-      
-      // 1. ユーザー情報（友達リスト）と、すべての新着メッセージの監視
       useEffect(() => {
         if (!isLoggedIn) return;
 
+        // 初期データの取得（所属グループ）
+        const fetchInitialGroups = async () => {
+          const { data } = await supabase.from('groups').select('*').contains('members', [username]);
+          if (data) setGroups(data);
+        };
+        fetchInitialGroups();
+
+        // 1. ユーザー情報（友達リスト）の監視
         const userChannel = supabase.channel('public:users')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, (payload) => {
             if (payload.new && payload.new.username === username) {
@@ -91,73 +101,120 @@
           })
           .subscribe();
 
+        // 2. グループ情報の監視
+        const groupChannel = supabase.channel('public:groups')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'groups' }, (payload) => {
+            if ((payload.event === 'INSERT' || payload.event === 'UPDATE') && payload.new.members.includes(username)) {
+              setGroups(prev => {
+                 const exists = prev.find(g => g.id === payload.new.id);
+                 if (exists) return prev.map(g => g.id === payload.new.id ? payload.new : g);
+                 return [...prev, payload.new];
+              });
+            }
+          })
+          .subscribe();
+
+        // 3. 全メッセージの監視（通知 & チャット画面更新用）
         const messageChannel = supabase.channel('public:global_messages')
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
             const newMsg = payload.new;
-            
             if (newMsg.sender === username) return;
 
-            const roomUsers = newMsg.room_name.split('_');
-            if (roomUsers.includes(username)) {
-              
-              const currentActiveRoom = activeFriendRef.current 
-                ? [username, activeFriendRef.current].sort().join('_') 
-                : null;
+            let isRelated = false;
+            let isCurrentRoom = false;
 
-              if (currentViewRef.current === 'chat' && newMsg.room_name === currentActiveRoom) {
-                setChats(prev => {
-                  if (prev.find(m => m.id === newMsg.id)) return prev;
-                  return [...prev, newMsg];
-                });
-              } else {
-                if ('Notification' in window && Notification.permission === 'granted') {
-                  const notificationText = newMsg.image_url ? "画像を送信しました📷" : newMsg.text;
-                  new Notification(`${newMsg.sender}さんから新着メッセージ`, {
-                    body: notificationText,
-                    icon: "https://cdn-icons-png.flaticon.com/512/3114/3114810.png"
+            // 現在開いているルーム名（DB上のroom_name）を計算
+            let currentRoomName = null;
+            if (activeRoomRef.current) {
+               if (activeRoomRef.current.type === 'direct') {
+                  currentRoomName = [username, activeRoomRef.current.id].sort().join('_');
+               } else {
+                  currentRoomName = activeRoomRef.current.id; // グループID
+               }
+            }
+
+            // このメッセージが自分に関係あるか判定
+            if (newMsg.room_name.startsWith('group_')) {
+               const group = groupsRef.current.find(g => g.id === newMsg.room_name);
+               if (group) {
+                  isRelated = true;
+                  if (currentRoomName === newMsg.room_name) isCurrentRoom = true;
+               }
+            } else {
+               const roomUsers = newMsg.room_name.split('_');
+               if (roomUsers.includes(username)) {
+                  isRelated = true;
+                  if (currentRoomName === newMsg.room_name) isCurrentRoom = true;
+               }
+            }
+
+            // 関係あれば処理
+            if (isRelated) {
+               if (isCurrentRoom) {
+                  // 現在開いているチャットなら画面に追加
+                  setChats(prev => {
+                    if (prev.find(m => m.id === newMsg.id)) return prev;
+                    return [...prev, newMsg];
                   });
-                }
-              }
+               } else {
+                  // 別画面なら通知を出す
+                  if ('Notification' in window && Notification.permission === 'granted') {
+                     const notificationText = newMsg.image_url ? "画像を送信しました📷" : newMsg.text;
+                     
+                     // グループからの通知ならグループ名も表示する
+                     let title = `${newMsg.sender}からのメッセージ`;
+                     if (newMsg.room_name.startsWith('group_')) {
+                         const groupName = groupsRef.current.find(g => g.id === newMsg.room_name)?.name || 'グループ';
+                         title = `${newMsg.sender} (${groupName})`;
+                     }
+                     
+                     new Notification(title, {
+                        body: notificationText,
+                        icon: "https://cdn-icons-png.flaticon.com/512/3114/3114810.png"
+                     });
+                  }
+               }
             }
           })
           .subscribe();
 
         return () => {
           supabase.removeChannel(userChannel);
+          supabase.removeChannel(groupChannel);
           supabase.removeChannel(messageChannel);
         };
       }, [isLoggedIn, username]);
 
-      // 2. トーク画面を開いたときに過去の履歴を読み込む
+      // --- アクティブルームが切り替わった時に過去ログを取得 ---
       useEffect(() => {
-        if (currentView === 'chat' && activeFriend) {
-          const roomName = [username, activeFriend].sort().join('_');
+        if (!activeRoom) return;
+        
+        const roomName = activeRoom.type === 'direct' 
+          ? [username, activeRoom.id].sort().join('_') 
+          : activeRoom.id;
           
-          const fetchMessages = async () => {
-            const { data, error } = await supabase
-              .from('messages')
-              .select('*')
-              .eq('room_name', roomName)
-              .order('created_at', { ascending: true });
-            
-            if (data) setChats(data);
-          };
-          fetchMessages();
-        }
-      }, [currentView, activeFriend, username]);
+        const fetchMessages = async () => {
+          const { data, error } = await supabase
+            .from('messages')
+            .select('*')
+            .eq('room_name', roomName)
+            .order('created_at', { ascending: true });
+          
+          if (data) setChats(data);
+        };
+        fetchMessages();
+      }, [activeRoom, username]);
 
       // スクロール処理
       useEffect(() => {
-        if (currentView === 'chat') {
+        if (activeRoom) {
           setTimeout(() => {
             messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
           }, 100);
         }
-      }, [chats, currentView, activeFriend]);
+      }, [chats, activeRoom]);
 
       // --- ハンドラー ---
-
-      // ログイン処理本体
       const performLogin = async (name) => {
         setIsLoading(true);
         setErrorMsg('');
@@ -167,16 +224,10 @@
             Notification.requestPermission();
           }
 
-          const { data, error } = await supabase
-            .from('users')
-            .select('friends')
-            .eq('username', name)
-            .single();
+          const { data, error } = await supabase.from('users').select('friends').eq('username', name).single();
 
           if (error && error.code === 'PGRST116') {
-            const { error: insertError } = await supabase
-              .from('users')
-              .insert([{ username: name, friends: [] }]);
+            const { error: insertError } = await supabase.from('users').insert([{ username: name, friends: [] }]);
             if (insertError) throw insertError;
             setFriends([]);
           } else if (data) {
@@ -185,7 +236,6 @@
              throw error;
           }
           
-          // ★ここで名前を記憶させる
           localStorage.setItem('chat_username', name);
           setIsLoggedIn(true);
         } catch (err) {
@@ -196,7 +246,6 @@
         }
       };
 
-      // ログインボタンを押したとき
       const handleLogin = (e) => {
         e.preventDefault();
         const name = username.trim();
@@ -204,19 +253,15 @@
         performLogin(name);
       };
 
-      // ログアウト処理
       const handleLogout = () => {
         if (!confirm("ログアウトしますか？")) return;
-        
-        // 記憶した名前を消去
         localStorage.removeItem('chat_username');
-        
         setIsLoggedIn(false);
         setUsername('');
         setFriends([]);
+        setGroups([]);
         setChats([]);
-        setCurrentView('home');
-        setActiveFriend(null);
+        setActiveRoom(null);
       };
 
       const handleAddFriend = async (e) => {
@@ -235,9 +280,8 @@
         const newFriends = friends.filter(f => f !== friendToDelete);
         setFriends(newFriends);
         
-        if (activeFriend === friendToDelete) {
-          setCurrentView('home');
-          setActiveFriend(null);
+        if (activeRoom?.id === friendToDelete) {
+          setActiveRoom(null);
         }
         setFriendToDelete(null);
 
@@ -248,24 +292,54 @@
         }
       };
 
-      const openChat = (friendName) => {
-        setActiveFriend(friendName);
-        setCurrentView('chat');
-        setErrorMsg('');
-      };
+      // グループ作成処理
+      const handleCreateGroup = async () => {
+        const trimmedName = newGroupName.trim();
+        if (!trimmedName || selectedFriends.length === 0) {
+          alert("グループ名と、1人以上の友達を選択してください！");
+          return;
+        }
 
-      const backToHome = () => {
-        setCurrentView('home');
-        setActiveFriend(null);
-        setErrorMsg('');
+        setIsLoading(true);
+        try {
+          const groupId = `group_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+          // 自分と選択した友達をメンバーにする
+          const members = [username, ...selectedFriends];
+          
+          const newGroup = {
+            id: groupId,
+            name: trimmedName,
+            members: members
+          };
+
+          const { error } = await supabase.from('groups').insert([newGroup]);
+          if (error) throw error;
+
+          // モーダルを閉じてリセット
+          setIsCreatingGroup(false);
+          setNewGroupName('');
+          setSelectedFriends([]);
+          // 作成したグループを開く
+          setActiveRoom({ type: 'group', id: groupId, name: trimmedName });
+
+        } catch (error) {
+           console.error("グループ作成エラー", error);
+           alert("グループの作成に失敗しました。SQLでのテーブル作成は完了していますか？");
+        } finally {
+          setIsLoading(false);
+        }
       };
 
       const handleSendMessage = async () => {
-        if (!messageInput.trim()) return;
+        if (!messageInput.trim() || !activeRoom) return;
 
         const now = new Date();
         const timeString = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-        const roomName = [username, activeFriend].sort().join('_');
+        
+        const roomName = activeRoom.type === 'direct' 
+          ? [username, activeRoom.id].sort().join('_') 
+          : activeRoom.id;
+
         const msgId = username + '_' + Date.now();
 
         const newMessage = {
@@ -289,6 +363,7 @@
       };
 
       const handleImageUpload = async (e) => {
+        if (!activeRoom) return;
         const file = e.target.files[0];
         if (!file) return;
 
@@ -301,25 +376,16 @@
           const fileName = `${Date.now()}_${randomString}.${fileExt}`;
           const filePath = `${fileName}`;
 
-          const { data: uploadData, error: uploadError } = await supabase.storage
-            .from('chat-images')
-            .upload(filePath, file);
+          const { error: uploadError } = await supabase.storage.from('chat-images').upload(filePath, file);
+          if (uploadError) throw new Error(uploadError.message);
 
-          if (uploadError) {
-             console.error("Storage Error Detail:", uploadError);
-             throw new Error(uploadError.message || "アップロードに失敗しました");
-          }
-
-          const { data: publicUrlData } = supabase.storage
-            .from('chat-images')
-            .getPublicUrl(filePath);
-
+          const { data: publicUrlData } = supabase.storage.from('chat-images').getPublicUrl(filePath);
           const imageUrl = publicUrlData.publicUrl;
 
           const now = new Date();
           const timeString = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
           const msgId = username + '_' + Date.now();
-          const roomName = [username, activeFriend].sort().join('_');
+          const roomName = activeRoom.type === 'direct' ? [username, activeRoom.id].sort().join('_') : activeRoom.id;
 
           const newMessage = {
             id: msgId,
@@ -333,12 +399,9 @@
           setChats(prev => [...prev, newMessage]);
 
           const { error: dbError } = await supabase.from('messages').insert([newMessage]);
-          if (dbError) {
-             throw new Error("データベース保存エラー: " + dbError.message);
-          }
+          if (dbError) throw new Error(dbError.message);
 
         } catch (error) {
-          console.error("画像送信エラー全体:", error);
           setErrorMsg(`画像送信エラー: ${error.message}`);
         } finally {
           setIsUploading(false);
@@ -347,13 +410,13 @@
       };
 
       const handleKeyDown = (e) => {
-        if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+        if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
           e.preventDefault();
           handleSendMessage();
         }
       };
 
-      // --- 自動ログイン確認中の画面 ---
+      // --- ローディング画面 ---
       if (isCheckingLogin) {
         return (
           <div className="flex items-center justify-center min-h-screen bg-gray-100">
@@ -369,10 +432,10 @@
             <div className="bg-white p-8 rounded-2xl shadow-lg w-full max-w-sm mx-4">
               <div className="flex justify-center mb-6">
                 <div className="bg-[#06C755] w-16 h-16 rounded-full flex items-center justify-center text-white">
-                  <i className="fa-solid fa-comment-dots text-3xl"></i>
+                  <i className="fa-solid fa-desktop text-3xl"></i>
                 </div>
               </div>
-              <h1 className="text-2xl font-bold text-center mb-6 text-gray-800">ようこそ</h1>
+              <h1 className="text-2xl font-bold text-center mb-6 text-gray-800">PC版チャット</h1>
               
               {errorMsg && (
                   <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4 text-sm break-words">
@@ -383,13 +446,13 @@
               <form onSubmit={handleLogin} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    アカウント名（あなたの名前）を入力してください
+                    アカウント名を入力してください
                   </label>
                   <input
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    className="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[#06C755] focus:border-transparent transition-colors"
+                    className="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[#06C755] transition-colors"
                     placeholder="名前を入力..."
                     autoFocus
                   />
@@ -407,247 +470,323 @@
         );
       }
 
-      // --- メイン画面 ---
+      // --- PC版メイン画面レイアウト (2ペイン) ---
       return (
-        <div className="flex justify-center min-h-screen bg-gray-200 py-0 sm:py-8">
-          <div className="w-full max-w-md bg-white sm:rounded-[2.5rem] shadow-2xl overflow-hidden flex flex-col relative sm:border-[8px] border-gray-800 h-screen sm:h-[800px]">
+        <div className="flex h-screen w-full bg-white font-sans text-gray-800">
+          
+          {/* 左サイドバー (幅固定320px) */}
+          <div className="w-[320px] bg-gray-50 border-r border-gray-200 flex flex-col flex-shrink-0 z-20 shadow-[2px_0_10px_rgba(0,0,0,0.02)]">
             
-            {/* ホーム画面 */}
-            {currentView === 'home' && (
-              <div className="flex flex-col h-full bg-white relative">
-                <header className="bg-white border-b border-gray-200 px-4 py-4 sticky top-0 z-10 flex justify-between items-center">
-                  <h1 className="text-xl font-bold text-gray-800">ホーム</h1>
-                  
-                  <div className="flex items-center space-x-4">
-                    {/* 通知アイコン */}
-                    {'Notification' in window && Notification.permission === 'granted' && (
-                      <i className="fa-regular fa-bell text-gray-400 text-sm" title="通知ON"></i>
-                    )}
-                    {/* ログアウトボタンを追加 */}
-                    <button 
-                      onClick={handleLogout}
-                      className="text-gray-400 hover:text-gray-600 transition"
-                      title="ログアウト"
-                    >
-                      <i className="fa-solid fa-arrow-right-from-bracket text-lg"></i>
-                    </button>
-                  </div>
-                </header>
-
-                <div className="flex-1 overflow-y-auto">
-                  <div className="p-4 flex items-center space-x-4 border-b border-gray-100">
-                    <div className="bg-gray-200 w-12 h-12 rounded-full flex items-center justify-center text-gray-500">
-                      <i className="fa-solid fa-user text-2xl"></i>
-                    </div>
-                    <div>
-                      <h2 className="text-lg font-bold text-gray-800">{username}</h2>
-                      <p className="text-sm text-gray-500">自分のアカウント</p>
-                    </div>
-                  </div>
-
-                  <div className="p-4 bg-gray-50 border-b border-gray-100">
-                    <h3 className="text-sm font-bold text-gray-500 mb-3">友達を追加</h3>
-                    <form onSubmit={handleAddFriend} className="flex space-x-2">
-                      <input
-                        type="text"
-                        value={newFriendName}
-                        onChange={(e) => setNewFriendName(e.target.value)}
-                        placeholder="友達の名前を入力..."
-                        className="flex-1 border border-gray-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:border-[#06C755] focus:ring-1 focus:ring-[#06C755]"
-                      />
-                      <button
-                        type="submit"
-                        className="bg-[#06C755] text-white p-2 px-4 rounded-full hover:bg-[#05b34c] transition flex items-center space-x-2"
-                      >
-                        <i className="fa-solid fa-user-plus text-sm"></i>
-                        <span className="text-sm font-bold">追加</span>
-                      </button>
-                    </form>
-                  </div>
-
-                  <div className="p-4">
-                    <h3 className="text-sm font-bold text-gray-500 mb-3">
-                      友達リスト {friends.length > 0 && `(${friends.length})`}
-                    </h3>
-                    {friends.length === 0 ? (
-                      <p className="text-gray-400 text-sm text-center py-8">
-                        まだ友達がいません。<br />上の入力欄から追加してみましょう！
-                      </p>
-                    ) : (
-                      <ul className="space-y-1">
-                        {friends.map((friend, index) => (
-                          <li key={index} className="flex items-center">
-                            <button
-                              onClick={() => openChat(friend)}
-                              className="flex-1 flex items-center p-3 rounded-xl hover:bg-gray-100 transition duration-150 text-left space-x-4"
-                            >
-                              <div className="bg-blue-100 w-10 h-10 rounded-full flex items-center justify-center text-blue-500">
-                                <i className="fa-solid fa-user text-xl"></i>
-                              </div>
-                              <span className="text-gray-800 font-medium text-lg flex-1">
-                                {friend}
-                              </span>
-                            </button>
-                            <button
-                              onClick={() => setFriendToDelete(friend)}
-                              className="p-3 ml-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition duration-150 flex-shrink-0"
-                              title={`${friend}さんを削除`}
-                            >
-                              <i className="fa-solid fa-user-minus"></i>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
+            {/* サイドバーヘッダー */}
+            <div className="p-4 bg-white border-b border-gray-200 flex justify-between items-center z-10">
+              <div className="flex items-center space-x-3">
+                <div className="bg-[#06C755] w-10 h-10 rounded-full flex items-center justify-center text-white font-bold">
+                   <i className="fa-solid fa-user"></i>
+                </div>
+                <div className="flex flex-col">
+                  <span className="font-bold text-[15px] leading-tight">{username}</span>
+                  <span className="text-[11px] text-gray-400">ログイン中</span>
                 </div>
               </div>
-            )}
+              <div className="flex space-x-3 text-gray-400">
+                {'Notification' in window && Notification.permission === 'granted' && (
+                  <i className="fa-regular fa-bell text-sm" title="通知ON"></i>
+                )}
+                <button onClick={handleLogout} className="hover:text-gray-700 transition" title="ログアウト">
+                  <i className="fa-solid fa-arrow-right-from-bracket"></i>
+                </button>
+              </div>
+            </div>
 
-            {/* トーク画面 */}
-            {currentView === 'chat' && (
-              <div className="flex flex-col h-full bg-[#7494C0]">
-                <header className="bg-white/95 backdrop-blur-sm px-2 py-3 flex items-center shadow-sm sticky top-0 z-10 relative">
-                  <button
-                    onClick={backToHome}
-                    className="p-2 text-gray-600 hover:bg-gray-100 rounded-full transition w-10 h-10 flex items-center justify-center"
-                  >
-                    <i className="fa-solid fa-chevron-left text-xl"></i>
+            <div className="flex-1 overflow-y-auto p-4 space-y-6">
+              
+              {/* 友達追加 */}
+              <div>
+                <h3 className="text-[11px] font-bold text-gray-400 mb-2 uppercase tracking-wider">友達を追加</h3>
+                <form onSubmit={handleAddFriend} className="flex">
+                  <input
+                    type="text"
+                    value={newFriendName}
+                    onChange={(e) => setNewFriendName(e.target.value)}
+                    placeholder="名前を入力..."
+                    className="flex-1 border border-gray-300 rounded-l-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#06C755]"
+                  />
+                  <button type="submit" className="bg-[#06C755] text-white px-3 py-1.5 rounded-r-md hover:bg-[#05b34c] transition">
+                    <i className="fa-solid fa-plus"></i>
                   </button>
-                  <h1 className="text-lg font-bold text-gray-800 ml-2">{activeFriend}</h1>
-                  
-                  {errorMsg && (
-                    <div className="absolute top-14 left-2 right-2 bg-red-100 border border-red-400 text-red-700 px-3 py-2 rounded text-xs shadow-md z-20 break-words">
-                      {errorMsg}
-                    </div>
-                  )}
-                </header>
+                </form>
+              </div>
 
-                <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                  <p className="text-center text-xs text-white/70 mb-4 bg-black/10 mx-auto w-fit px-3 py-1 rounded-full">
-                    {activeFriend} さんとのトークを始めました
-                  </p>
+              {/* グループ一覧 */}
+              <div>
+                <div className="flex justify-between items-center mb-2">
+                  <h3 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">グループ ({groups.length})</h3>
+                  <button 
+                    onClick={() => setIsCreatingGroup(true)}
+                    className="text-[11px] bg-white border border-gray-300 text-gray-600 px-2 py-1 rounded shadow-sm hover:bg-gray-100 transition flex items-center"
+                  >
+                    <i className="fa-solid fa-users mr-1"></i>作成
+                  </button>
+                </div>
+                <ul className="space-y-1">
+                  {groups.length === 0 && <p className="text-xs text-gray-400 py-1">グループはありません</p>}
+                  {groups.map(group => (
+                     <li key={group.id}>
+                       <button 
+                         onClick={() => setActiveRoom({ type: 'group', id: group.id, name: group.name })}
+                         className={`w-full flex items-center p-2 rounded-lg transition text-left ${activeRoom?.id === group.id ? 'bg-[#06C755]/10 text-[#06C755]' : 'hover:bg-gray-200 text-gray-700'}`}
+                       >
+                         <div className="bg-orange-100 w-8 h-8 rounded-full flex items-center justify-center text-orange-500 mr-3 flex-shrink-0">
+                           <i className="fa-solid fa-users text-sm"></i>
+                         </div>
+                         <div className="flex-1 min-w-0">
+                           <p className="font-medium truncate text-sm">{group.name}</p>
+                           <p className="text-[10px] text-gray-400 truncate">{group.members.length}人のメンバー</p>
+                         </div>
+                       </button>
+                     </li>
+                  ))}
+                </ul>
+              </div>
 
-                  {chats.map((msg, index) => {
-                    const isMe = msg.sender === username;
-                    return (
-                      <div
-                        key={index}
-                        className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}
-                      >
-                        {!isMe && (
-                          <div className="w-8 h-8 rounded-full bg-gray-300 flex-shrink-0 mr-2 flex items-center justify-center overflow-hidden mt-1">
-                            <i className="fa-solid fa-user text-gray-500"></i>
-                          </div>
+              {/* 友達一覧（個人チャット） */}
+              <div>
+                <h3 className="text-[11px] font-bold text-gray-400 mb-2 uppercase tracking-wider">友達 ({friends.length})</h3>
+                <ul className="space-y-1">
+                  {friends.length === 0 && <p className="text-xs text-gray-400 py-1">友達を追加してください</p>}
+                  {friends.map(friend => (
+                     <li key={friend} className="flex items-center group">
+                       <button 
+                         onClick={() => setActiveRoom({ type: 'direct', id: friend, name: friend })}
+                         className={`flex-1 flex items-center p-2 rounded-lg transition text-left ${activeRoom?.id === friend ? 'bg-[#06C755]/10 text-[#06C755]' : 'hover:bg-gray-200 text-gray-700'}`}
+                       >
+                         <div className="bg-blue-100 w-8 h-8 rounded-full flex items-center justify-center text-blue-500 mr-3 flex-shrink-0">
+                           <i className="fa-solid fa-user text-sm"></i>
+                         </div>
+                         <span className="font-medium truncate text-sm">{friend}</span>
+                       </button>
+                       <button 
+                          onClick={() => setFriendToDelete(friend)}
+                          className="opacity-0 group-hover:opacity-100 p-2 text-gray-400 hover:text-red-500 transition"
+                          title="削除"
+                       >
+                         <i className="fa-solid fa-xmark"></i>
+                       </button>
+                     </li>
+                  ))}
+                </ul>
+              </div>
+
+            </div>
+          </div>
+
+          {/* 右メインエリア (トーク画面) */}
+          <div className="flex-1 flex flex-col bg-[#7494C0] relative">
+             {activeRoom ? (
+                // 選択中のトーク画面
+                <div className="flex flex-col h-full">
+                   {/* チャットヘッダー */}
+                   <header className="bg-white/95 backdrop-blur-sm px-6 py-4 flex items-center shadow-sm sticky top-0 z-10">
+                      <div>
+                        <h1 className="text-lg font-bold text-gray-800">{activeRoom.name}</h1>
+                        {activeRoom.type === 'group' && (
+                           <p className="text-xs text-gray-500 mt-0.5">
+                              <i className="fa-solid fa-user mr-1"></i>
+                              メンバー: {groups.find(g => g.id === activeRoom.id)?.members.join(', ')}
+                           </p>
                         )}
-                        <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[75%]`}>
-                          
-                          <div className={`flex items-end space-x-1 ${isMe ? 'flex-row-reverse space-x-reverse' : 'flex-row'}`}>
-                            
-                            {msg.image_url ? (
-                              <img 
-                                src={msg.image_url} 
-                                alt="送信された画像" 
-                                className="max-w-[200px] sm:max-w-[250px] rounded-2xl shadow-sm border border-black/10 bg-white min-h-[50px] min-w-[50px]"
-                                onLoad={() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })}
-                                onError={(e) => { e.target.src = 'https://placehold.co/200x200?text=Image+Error'; }}
-                              />
-                            ) : (
-                              <div
-                                className={`px-4 py-2 text-[15px] leading-relaxed break-words rounded-2xl ${
-                                  isMe
-                                    ? 'bg-[#85E249] rounded-tr-sm text-gray-800'
-                                    : 'bg-white rounded-tl-sm text-gray-800'
-                                } shadow-sm`}
-                              >
-                                {msg.text}
+                      </div>
+                      
+                      {errorMsg && (
+                        <div className="ml-auto bg-red-100 border border-red-400 text-red-700 px-3 py-1 rounded text-xs">
+                          {errorMsg}
+                        </div>
+                      )}
+                   </header>
+
+                   {/* メッセージ表示エリア */}
+                   <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                      <div className="text-center">
+                        <span className="text-xs text-white/70 bg-black/10 px-3 py-1 rounded-full">
+                          ここからトークが始まります
+                        </span>
+                      </div>
+
+                      {chats.map((msg, index) => {
+                        const isMe = msg.sender === username;
+                        return (
+                          <div key={index} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
+                            {!isMe && (
+                              <div className="w-10 h-10 rounded-full bg-gray-200 flex-shrink-0 mr-3 flex items-center justify-center overflow-hidden mt-1 shadow-sm">
+                                <i className="fa-solid fa-user text-gray-500"></i>
                               </div>
                             )}
+                            <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[60%]`}>
+                              
+                              {/* 相手の場合＆グループの場合のみ、名前を表示する */}
+                              {!isMe && activeRoom.type === 'group' && (
+                                <span className="text-xs text-white/80 mb-1 ml-1">{msg.sender}</span>
+                              )}
 
-                            <span className="text-[10px] text-white/80 pb-1 flex-shrink-0">
-                              {msg.time}
-                            </span>
+                              <div className={`flex items-end space-x-2 ${isMe ? 'flex-row-reverse space-x-reverse' : 'flex-row'}`}>
+                                
+                                {msg.image_url ? (
+                                  <img 
+                                    src={msg.image_url} 
+                                    alt="画像" 
+                                    className="max-w-[300px] rounded-2xl shadow-sm border border-black/10 bg-white"
+                                    onLoad={() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })}
+                                  />
+                                ) : (
+                                  <div className={`px-4 py-2.5 text-[15px] leading-relaxed break-words rounded-2xl ${
+                                      isMe ? 'bg-[#85E249] rounded-tr-sm text-gray-900' : 'bg-white rounded-tl-sm text-gray-900'
+                                    } shadow-sm`}
+                                  >
+                                    {/* 改行を反映して表示 */}
+                                    {msg.text.split('\n').map((line, i) => (
+                                       <React.Fragment key={i}>{line}<br/></React.Fragment>
+                                    ))}
+                                  </div>
+                                )}
+                                <span className="text-[11px] text-white/80 pb-1 flex-shrink-0">{msg.time}</span>
+                              </div>
+                            </div>
                           </div>
-                        </div>
+                        );
+                      })}
+                      <div ref={messagesEndRef} />
+                   </div>
+
+                   {/* 入力エリア */}
+                   <div className="bg-white p-4 border-t border-gray-200">
+                      <div className="flex items-end bg-gray-100 rounded-xl px-3 py-2 border border-transparent focus-within:border-gray-300 focus-within:bg-white transition-colors">
+                        
+                        <input type="file" accept="image/*" className="hidden" ref={fileInputRef} onChange={handleImageUpload} />
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          disabled={isUploading}
+                          className="p-2 mb-0.5 text-gray-400 hover:text-gray-600 transition flex items-center justify-center flex-shrink-0 rounded-full hover:bg-gray-200"
+                          title="画像を送る"
+                        >
+                          {isUploading ? <i className="fa-solid fa-spinner fa-spin text-lg"></i> : <i className="fa-regular fa-image text-xl"></i>}
+                        </button>
+
+                        <textarea
+                          value={messageInput}
+                          onChange={(e) => setMessageInput(e.target.value)}
+                          onKeyDown={handleKeyDown}
+                          placeholder="メッセージを入力... (Shift + Enterで改行)"
+                          className="flex-1 bg-transparent border-none focus:ring-0 resize-none max-h-40 min-h-[44px] py-2.5 px-3 text-gray-800 focus:outline-none"
+                          rows={1}
+                        />
+                        
+                        <button
+                          onClick={handleSendMessage}
+                          disabled={!messageInput.trim() || isUploading}
+                          className="p-2 mb-0.5 ml-2 bg-[#06C755] disabled:bg-gray-300 text-white rounded-full transition w-10 h-10 flex items-center justify-center flex-shrink-0 shadow-sm"
+                        >
+                          <i className="fa-solid fa-paper-plane text-sm ml-[-2px]"></i>
+                        </button>
                       </div>
-                    );
-                  })}
-                  <div ref={messagesEndRef} />
+                   </div>
                 </div>
-
-                {/* 入力エリア */}
-                <div className="bg-white p-2 border-t border-gray-200">
-                  <div className="flex items-end bg-gray-100 rounded-2xl px-2 py-1">
-                    
-                    <input 
-                      type="file" 
-                      accept="image/*" 
-                      className="hidden" 
-                      ref={fileInputRef}
-                      onChange={handleImageUpload}
-                    />
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={isUploading}
-                      className="p-2 mb-1 text-gray-500 hover:text-gray-700 transition w-10 h-10 flex items-center justify-center flex-shrink-0"
-                    >
-                      {isUploading ? (
-                         <i className="fa-solid fa-spinner fa-spin text-lg"></i>
-                      ) : (
-                         <i className="fa-regular fa-image text-xl"></i>
-                      )}
-                    </button>
-
-                    <textarea
-                      value={messageInput}
-                      onChange={(e) => setMessageInput(e.target.value)}
-                      onKeyDown={handleKeyDown}
-                      placeholder="メッセージを入力..."
-                      className="flex-1 bg-transparent border-none focus:ring-0 resize-none max-h-32 min-h-[40px] py-2 px-2 text-gray-800 focus:outline-none"
-                      rows={1}
-                    />
-                    
-                    <button
-                      onClick={handleSendMessage}
-                      disabled={!messageInput.trim() || isUploading}
-                      className="p-2 mb-1 text-blue-500 disabled:text-gray-400 hover:text-blue-600 transition w-10 h-10 flex items-center justify-center flex-shrink-0"
-                    >
-                      <i className="fa-solid fa-paper-plane text-xl"></i>
-                    </button>
-                  </div>
+             ) : (
+                // 選択されていない時
+                <div className="flex-1 flex flex-col items-center justify-center text-white/60">
+                   <div className="bg-white/10 w-32 h-32 rounded-full flex items-center justify-center mb-6">
+                     <i className="fa-regular fa-comments text-6xl"></i>
+                   </div>
+                   <p className="text-xl font-medium tracking-wide">左のリストからチャットを選択してください</p>
                 </div>
-              </div>
-            )}
-
-            {/* 削除確認用オーバーレイ（モーダル） */}
-            {friendToDelete && (
-              <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-                <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl animate-[fadeIn_0.2s_ease-out]">
-                  <h3 className="text-lg font-bold text-gray-800 mb-2 flex items-center text-red-500">
-                    <i className="fa-solid fa-triangle-exclamation mr-2"></i>確認
-                  </h3>
-                  <p className="text-gray-600 mb-6 text-sm leading-relaxed">
-                    「<span className="font-bold text-gray-800">{friendToDelete}</span>」さんを友達リストから削除しますか？<br/>
-                    <span className="text-xs text-gray-400 block mt-2">※過去のトーク履歴は消えません。</span>
-                  </p>
-                  <div className="flex justify-end space-x-3">
-                    <button
-                      onClick={() => setFriendToDelete(null)}
-                      className="px-4 py-2 rounded-xl text-gray-600 font-medium hover:bg-gray-100 transition"
-                    >
-                      キャンセル
-                    </button>
-                    <button
-                      onClick={handleRemoveFriend}
-                      className="px-4 py-2 rounded-xl bg-red-500 text-white font-medium hover:bg-red-600 transition flex items-center"
-                    >
-                      <i className="fa-solid fa-user-minus mr-2"></i>削除する
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
+             )}
           </div>
+
+          {/* グループ作成モーダル */}
+          {isCreatingGroup && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+              <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl animate-[fadeIn_0.2s_ease-out]">
+                <div className="flex justify-between items-center mb-5">
+                  <h3 className="text-lg font-bold text-gray-800">グループを作成</h3>
+                  <button onClick={() => setIsCreatingGroup(false)} className="text-gray-400 hover:text-gray-600">
+                    <i className="fa-solid fa-xmark text-xl"></i>
+                  </button>
+                </div>
+                
+                <div className="mb-5">
+                  <label className="block text-sm font-bold text-gray-700 mb-2">グループ名</label>
+                  <input 
+                    type="text" 
+                    value={newGroupName} 
+                    onChange={e => setNewGroupName(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:border-[#06C755] focus:ring-1 focus:ring-[#06C755]"
+                    placeholder="例：プロジェクトチーム"
+                    autoFocus
+                  />
+                </div>
+
+                <div className="mb-6">
+                  <label className="block text-sm font-bold text-gray-700 mb-2">メンバーを選択 (友達リスト)</label>
+                  <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-lg p-2 space-y-1 bg-gray-50">
+                    {friends.length === 0 ? (
+                      <p className="text-sm text-gray-400 text-center py-4">友達がいません</p>
+                    ) : (
+                      friends.map(f => (
+                        <label key={f} className="flex items-center space-x-3 cursor-pointer p-2 hover:bg-white rounded-md transition border border-transparent hover:border-gray-200">
+                          <input 
+                            type="checkbox" 
+                            checked={selectedFriends.includes(f)}
+                            onChange={(e) => {
+                              if (e.target.checked) setSelectedFriends([...selectedFriends, f]);
+                              else setSelectedFriends(selectedFriends.filter(sf => sf !== f));
+                            }}
+                            className="w-4 h-4 rounded text-[#06C755] focus:ring-[#06C755] border-gray-300"
+                          />
+                          <span className="text-gray-800 font-medium">{f}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">※あなた自身は自動的に追加されます。</p>
+                </div>
+
+                <div className="flex justify-end space-x-3">
+                  <button onClick={() => setIsCreatingGroup(false)} className="px-4 py-2 rounded-lg text-gray-600 font-medium hover:bg-gray-100 transition">
+                    キャンセル
+                  </button>
+                  <button 
+                    onClick={handleCreateGroup} 
+                    disabled={isLoading}
+                    className="px-6 py-2 rounded-lg bg-[#06C755] text-white font-bold hover:bg-[#05b34c] disabled:bg-gray-300 transition flex items-center"
+                  >
+                    {isLoading ? <i className="fa-solid fa-spinner fa-spin"></i> : "作成する"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 友達削除確認モーダル */}
+          {friendToDelete && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+              <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl animate-[fadeIn_0.2s_ease-out]">
+                <h3 className="text-lg font-bold text-gray-800 mb-2 flex items-center text-red-500">
+                  <i className="fa-solid fa-triangle-exclamation mr-2"></i>確認
+                </h3>
+                <p className="text-gray-600 mb-6 text-sm leading-relaxed">
+                  「<span className="font-bold text-gray-800">{friendToDelete}</span>」さんを友達リストから削除しますか？
+                </p>
+                <div className="flex justify-end space-x-3">
+                  <button onClick={() => setFriendToDelete(null)} className="px-4 py-2 rounded-lg text-gray-600 font-medium hover:bg-gray-100 transition">
+                    キャンセル
+                  </button>
+                  <button onClick={handleRemoveFriend} className="px-4 py-2 rounded-lg bg-red-500 text-white font-medium hover:bg-red-600 transition">
+                    削除する
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          
         </div>
       );
     }
