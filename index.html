@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>3D Online Flight - Supabase Edition</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #menu { position: absolute; z-index: 10; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; flex-direction: column; align-items: center; justify-content: center; color: white; }
+        .btn { padding: 20px; margin: 10px; cursor: pointer; background: #3cb371; border: none; color: white; border-radius: 5px; font-size: 20px; width: 200px; }
+        #ui { position: absolute; top: 10px; left: 10px; color: white; pointer-events: none; display: none; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="menu">
+        <h1>Select Your Aircraft</h1>
+        <button class="btn" onclick="start('stunt')">🛩️ 軽飛行機</button>
+        <button class="btn" onclick="start('airliner')" style="background: #4682b4;">✈️ 旅客機</button>
+    </div>
+
+    <div id="ui">
+        <div id="stat">Connecting...</div>
+    </div>
+
+    <script>
+        // === 設定 (ここに自分の情報を入力) ===
+        const SUPABASE_URL = https://jyuwcmasqhureaphziwl.supabase.co;
+        const SUPABASE_KEY = sb_publishable_P8iXfARkpljKSDi6cbAebA_a6-wrnV5;
+        const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        let scene, camera, renderer, localPlane, myId;
+        let remotePlanes = {};
+        let isStarted = false;
+        let speed = 0, throttle = 0;
+        let mouseX = 0, mouseY = 0;
+
+        async function start(type) {
+            document.getElementById('menu').style.display = 'none';
+            document.getElementById('ui').style.display = 'block';
+            myId = crypto.randomUUID(); // 自分の一時的なID
+            initThree(type);
+            initSupabase(type);
+            isStarted = true;
+        }
+
+        function initThree(type) {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 10000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // 地面
+            const ground = new THREE.Mesh(new THREE.PlaneGeometry(10000, 10000), new THREE.MeshStandardMaterial({color: 0x558855}));
+            ground.rotation.x = -Math.PI/2;
+            scene.add(ground);
+            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+            const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+            sun.position.set(100, 100, 100);
+            scene.add(sun);
+
+            localPlane = createPlaneModel(type, "#" + Math.floor(Math.random()*16777215).toString(16));
+            scene.add(localPlane);
+            localPlane.position.y = 2;
+            localPlane.add(camera);
+            camera.position.set(0, type === 'airliner' ? 8 : 4, type === 'airliner' ? 25 : 12);
+            
+            window.onmousemove = (e) => {
+                mouseX = (e.clientX / window.innerWidth) * 2 - 1;
+                mouseY = -(e.clientY / window.innerHeight) * 2 + 1;
+            };
+        }
+
+        function createPlaneModel(type, color) {
+            const group = new THREE.Group();
+            const mat = new THREE.MeshStandardMaterial({color: color});
+            const bodyGeo = type === 'airliner' ? new THREE.CylinderGeometry(1.2, 1, 10) : new THREE.CylinderGeometry(0.5, 0.3, 4);
+            const body = new THREE.Mesh(bodyGeo, mat);
+            body.rotation.x = Math.PI/2;
+            group.add(body);
+            const wingGeo = type === 'airliner' ? new THREE.BoxGeometry(16, 0.1, 3) : new THREE.BoxGeometry(7, 0.1, 1.2);
+            const wings = new THREE.Mesh(wingGeo, mat);
+            group.add(wings);
+            return group;
+        }
+
+        async function initSupabase(type) {
+            // 他人の動きを監視
+            const channel = supabase.channel('room1')
+            .on('broadcast', { event: 'move' }, (payload) => {
+                if (payload.payload.id === myId) return;
+                updateRemotePlayer(payload.payload);
+            })
+            .subscribe();
+
+            // 自分の位置を定期的に送信（Broadcast機能を使用）
+            setInterval(() => {
+                if (!isStarted) return;
+                channel.send({
+                    type: 'broadcast',
+                    event: 'move',
+                    payload: {
+                        id: myId,
+                        type: type,
+                        x: localPlane.position.x, y: localPlane.position.y, z: localPlane.position.z,
+                        qx: localPlane.quaternion.x, qy: localPlane.quaternion.y, qz: localPlane.quaternion.z, qw: localPlane.quaternion.w
+                    }
+                });
+            }, 50); // 0.05秒ごとに送信
+        }
+
+        function updateRemotePlayer(data) {
+            if (!remotePlanes[data.id]) {
+                remotePlanes[data.id] = createPlaneModel(data.type, "#ffffff");
+                scene.add(remotePlanes[data.id]);
+            }
+            const p = remotePlanes[data.id];
+            p.position.lerp(new THREE.Vector3(data.x, data.y, data.z), 0.2);
+            p.quaternion.slerp(new THREE.Quaternion(data.qx, data.qy, data.qz, data.qw), 0.2);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (!isStarted) return;
+
+            speed = 2.0; // 常時前進
+            localPlane.rotateX(mouseY * 0.03);
+            localPlane.rotateY(-mouseX * 0.03);
+            localPlane.translateZ(-speed);
+
+            if (localPlane.position.y < 1.5) localPlane.position.y = 1.5;
+
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
