@@ -27,9 +27,9 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
-    // 教えていただいたSupabaseの設定を反映しました！
+    // 教えていただいた正しいSupabaseのURLとキー（anonキー）を反映しました！
     const SUPABASE_URL = "https://esmxetaqzojcitpnmbws.supabase.co";
-    const SUPABASE_ANON_KEY = "sb_publishable_kxsQjHnR26xWMsUuliG8yw_KGg33Kr-";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVzbXhldGFxem9qY2l0cG5tYndzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMyMDM2ODIsImV4cCI6MjA4ODc3OTY4Mn0.Bq9lgljH0-1nynLi6IEa_Jkz8sNPIYozjXIknznK-Rs";
     
     // Supabaseクライアントの作成
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -104,7 +104,10 @@
       // スクロール処理
       useEffect(() => {
         if (currentView === 'chat') {
-          messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+          // 画像の読み込み完了を待たずにスクロールするのを防ぐため、少し遅延させる
+          setTimeout(() => {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+          }, 100);
         }
       }, [chats, currentView, activeFriend]);
 
