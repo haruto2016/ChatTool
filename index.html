@@ -1,141 +1,496 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="UTF-8">
-    <title>3D Online Flight - Supabase Edition</title>
-    <style>
-        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
-        #menu { position: absolute; z-index: 10; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; flex-direction: column; align-items: center; justify-content: center; color: white; }
-        .btn { padding: 20px; margin: 10px; cursor: pointer; background: #3cb371; border: none; color: white; border-radius: 5px; font-size: 20px; width: 200px; }
-        #ui { position: absolute; top: 10px; left: 10px; color: white; pointer-events: none; display: none; }
-    </style>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LINE風チャットアプリ</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- FontAwesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- React & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Supabase SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
+  <div id="root"></div>
 
-    <div id="menu">
-        <h1>Select Your Aircraft</h1>
-        <button class="btn" onclick="start('stunt')">🛩️ 軽飛行機</button>
-        <button class="btn" onclick="start('airliner')" style="background: #4682b4;">✈️ 旅客機</button>
-    </div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
 
-    <div id="ui">
-        <div id="stat">Connecting...</div>
-    </div>
+    // 教えていただいたSupabaseの設定を反映しました！
+    const SUPABASE_URL = "https://esmxetaqzojcitpnmbws.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_kxsQjHnR26xWMsUuliG8yw_KGg33Kr-";
+    
+    // Supabaseクライアントの作成
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-    <script>
-        // === 設定 (ここに自分の情報を入力) ===
-        const SUPABASE_URL = https://jyuwcmasqhureaphziwl.supabase.co;
-        const SUPABASE_KEY = sb_publishable_P8iXfARkpljKSDi6cbAebA_a6-wrnV5;
-        const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    function App() {
+      // --- State ---
+      const [username, setUsername] = useState('');
+      const [isLoggedIn, setIsLoggedIn] = useState(false);
+      const [isLoading, setIsLoading] = useState(false);
+      const [errorMsg, setErrorMsg] = useState('');
+      
+      const [friends, setFriends] = useState([]);
+      const [newFriendName, setNewFriendName] = useState('');
+      
+      const [currentView, setCurrentView] = useState('home');
+      const [activeFriend, setActiveFriend] = useState(null);
+      
+      const [chats, setChats] = useState([]);
+      const [messageInput, setMessageInput] = useState('');
+      const [isUploading, setIsUploading] = useState(false);
 
-        let scene, camera, renderer, localPlane, myId;
-        let remotePlanes = {};
-        let isStarted = false;
-        let speed = 0, throttle = 0;
-        let mouseX = 0, mouseY = 0;
+      const messagesEndRef = useRef(null);
+      const fileInputRef = useRef(null);
 
-        async function start(type) {
-            document.getElementById('menu').style.display = 'none';
-            document.getElementById('ui').style.display = 'block';
-            myId = crypto.randomUUID(); // 自分の一時的なID
-            initThree(type);
-            initSupabase(type);
-            isStarted = true;
-        }
+      // --- データベースから情報をリアルタイムで読み込む ---
+      useEffect(() => {
+        if (!isLoggedIn) return;
 
-        function initThree(type) {
-            scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x87CEEB);
-            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 10000);
-            renderer = new THREE.WebGLRenderer({ antialias: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            document.body.appendChild(renderer.domElement);
+        // 1. 自分の友達リストの変更を監視
+        const userChannel = supabase.channel('public:users')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, (payload) => {
+            if (payload.new && payload.new.username === username) {
+              setFriends(payload.new.friends || []);
+            }
+          })
+          .subscribe();
 
-            // 地面
-            const ground = new THREE.Mesh(new THREE.PlaneGeometry(10000, 10000), new THREE.MeshStandardMaterial({color: 0x558855}));
-            ground.rotation.x = -Math.PI/2;
-            scene.add(ground);
-            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-            const sun = new THREE.DirectionalLight(0xffffff, 0.8);
-            sun.position.set(100, 100, 100);
-            scene.add(sun);
-
-            localPlane = createPlaneModel(type, "#" + Math.floor(Math.random()*16777215).toString(16));
-            scene.add(localPlane);
-            localPlane.position.y = 2;
-            localPlane.add(camera);
-            camera.position.set(0, type === 'airliner' ? 8 : 4, type === 'airliner' ? 25 : 12);
+        // 2. トーク画面のメッセージ監視
+        let messageChannel = null;
+        if (currentView === 'chat' && activeFriend) {
+          const roomName = [username, activeFriend].sort().join('_');
+          
+          const fetchMessages = async () => {
+            const { data, error } = await supabase
+              .from('messages')
+              .select('*')
+              .eq('room_name', roomName)
+              .order('created_at', { ascending: true });
             
-            window.onmousemove = (e) => {
-                mouseX = (e.clientX / window.innerWidth) * 2 - 1;
-                mouseY = -(e.clientY / window.innerHeight) * 2 + 1;
-            };
-        }
+            if (data) setChats(data);
+          };
+          fetchMessages();
 
-        function createPlaneModel(type, color) {
-            const group = new THREE.Group();
-            const mat = new THREE.MeshStandardMaterial({color: color});
-            const bodyGeo = type === 'airliner' ? new THREE.CylinderGeometry(1.2, 1, 10) : new THREE.CylinderGeometry(0.5, 0.3, 4);
-            const body = new THREE.Mesh(bodyGeo, mat);
-            body.rotation.x = Math.PI/2;
-            group.add(body);
-            const wingGeo = type === 'airliner' ? new THREE.BoxGeometry(16, 0.1, 3) : new THREE.BoxGeometry(7, 0.1, 1.2);
-            const wings = new THREE.Mesh(wingGeo, mat);
-            group.add(wings);
-            return group;
-        }
-
-        async function initSupabase(type) {
-            // 他人の動きを監視
-            const channel = supabase.channel('room1')
-            .on('broadcast', { event: 'move' }, (payload) => {
-                if (payload.payload.id === myId) return;
-                updateRemotePlayer(payload.payload);
+          messageChannel = supabase.channel('public:messages')
+            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
+              if (payload.new.room_name === roomName) {
+                setChats(prev => {
+                  if (prev.find(m => m.id === payload.new.id)) return prev;
+                  return [...prev, payload.new];
+                });
+              }
             })
             .subscribe();
-
-            // 自分の位置を定期的に送信（Broadcast機能を使用）
-            setInterval(() => {
-                if (!isStarted) return;
-                channel.send({
-                    type: 'broadcast',
-                    event: 'move',
-                    payload: {
-                        id: myId,
-                        type: type,
-                        x: localPlane.position.x, y: localPlane.position.y, z: localPlane.position.z,
-                        qx: localPlane.quaternion.x, qy: localPlane.quaternion.y, qz: localPlane.quaternion.z, qw: localPlane.quaternion.w
-                    }
-                });
-            }, 50); // 0.05秒ごとに送信
         }
 
-        function updateRemotePlayer(data) {
-            if (!remotePlanes[data.id]) {
-                remotePlanes[data.id] = createPlaneModel(data.type, "#ffffff");
-                scene.add(remotePlanes[data.id]);
-            }
-            const p = remotePlanes[data.id];
-            p.position.lerp(new THREE.Vector3(data.x, data.y, data.z), 0.2);
-            p.quaternion.slerp(new THREE.Quaternion(data.qx, data.qy, data.qz, data.qw), 0.2);
+        return () => {
+          supabase.removeChannel(userChannel);
+          if (messageChannel) supabase.removeChannel(messageChannel);
+        };
+      }, [isLoggedIn, currentView, activeFriend, username]);
+
+      // スクロール処理
+      useEffect(() => {
+        if (currentView === 'chat') {
+          messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
         }
+      }, [chats, currentView, activeFriend]);
 
-        function animate() {
-            requestAnimationFrame(animate);
-            if (!isStarted) return;
+      // --- ハンドラー ---
+      const handleLogin = async (e) => {
+        e.preventDefault();
+        const name = username.trim();
+        if (!name) return;
+        
+        setIsLoading(true);
+        setErrorMsg('');
 
-            speed = 2.0; // 常時前進
-            localPlane.rotateX(mouseY * 0.03);
-            localPlane.rotateY(-mouseX * 0.03);
-            localPlane.translateZ(-speed);
+        try {
+          const { data, error } = await supabase
+            .from('users')
+            .select('friends')
+            .eq('username', name)
+            .single();
 
-            if (localPlane.position.y < 1.5) localPlane.position.y = 1.5;
-
-            renderer.render(scene, camera);
+          if (error && error.code === 'PGRST116') {
+            const { error: insertError } = await supabase
+              .from('users')
+              .insert([{ username: name, friends: [] }]);
+            if (insertError) throw insertError;
+            setFriends([]);
+          } else if (data) {
+            setFriends(data.friends || []);
+          } else if (error) {
+             throw error;
+          }
+          setIsLoggedIn(true);
+        } catch (err) {
+          console.error(err);
+          setErrorMsg("ログインに失敗しました。SQLでのテーブル作成は完了していますか？(もしエラーが続く場合、キーが間違っている可能性があります)");
+        } finally {
+          setIsLoading(false);
         }
-        animate();
-    </script>
+      };
+
+      const handleAddFriend = async (e) => {
+        e.preventDefault();
+        const name = newFriendName.trim();
+        if (name && !friends.includes(name) && name !== username) {
+          const newFriends = [...friends, name];
+          setFriends(newFriends);
+          setNewFriendName('');
+          await supabase.from('users').update({ friends: newFriends }).eq('username', username);
+        }
+      };
+
+      const openChat = (friendName) => {
+        setActiveFriend(friendName);
+        setCurrentView('chat');
+      };
+
+      const backToHome = () => {
+        setCurrentView('home');
+        setActiveFriend(null);
+      };
+
+      // テキストメッセージ送信
+      const handleSendMessage = async () => {
+        if (!messageInput.trim()) return;
+
+        const now = new Date();
+        const timeString = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+        const roomName = [username, activeFriend].sort().join('_');
+        const msgId = username + '_' + Date.now();
+
+        const newMessage = {
+          id: msgId,
+          room_name: roomName,
+          sender: username,
+          text: messageInput.trim(),
+          image_url: null, // テキストなので画像なし
+          time: timeString,
+        };
+
+        setChats(prev => [...prev, newMessage]);
+        setMessageInput('');
+
+        try {
+          const { error } = await supabase.from('messages').insert([newMessage]);
+          if (error) console.error("送信エラー", error);
+        } catch(e) {
+          console.error("送信エラー", e);
+        }
+      };
+
+      // 画像送信
+      const handleImageUpload = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        setIsUploading(true);
+        try {
+          // 1. Storageに画像をアップロード
+          const fileExt = file.name.split('.').pop();
+          const fileName = `${username}_${Date.now()}.${fileExt}`;
+          const roomName = [username, activeFriend].sort().join('_');
+          const filePath = `${roomName}/${fileName}`; // トークルームごとにフォルダ分け
+
+          const { error: uploadError } = await supabase.storage
+            .from('chat-images')
+            .upload(filePath, file);
+
+          if (uploadError) throw uploadError;
+
+          // 2. 画像の公開URLを取得
+          const { data: publicUrlData } = supabase.storage
+            .from('chat-images')
+            .getPublicUrl(filePath);
+
+          const imageUrl = publicUrlData.publicUrl;
+
+          // 3. メッセージとしてDBに保存
+          const now = new Date();
+          const timeString = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+          const msgId = username + '_' + Date.now();
+
+          const newMessage = {
+            id: msgId,
+            room_name: roomName,
+            sender: username,
+            text: null, // 画像なのでテキストなし
+            image_url: imageUrl,
+            time: timeString,
+          };
+
+          setChats(prev => [...prev, newMessage]); // 画面に即反映
+
+          const { error: dbError } = await supabase.from('messages').insert([newMessage]);
+          if (dbError) throw dbError;
+
+        } catch (error) {
+          console.error("画像送信エラー:", error);
+          alert("画像の送信に失敗しました。SQLでのStorage設定が完了しているか確認してください。");
+        } finally {
+          setIsUploading(false);
+          if (fileInputRef.current) fileInputRef.current.value = ''; // 入力をリセット
+        }
+      };
+
+      const handleKeyDown = (e) => {
+        if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+          e.preventDefault();
+          handleSendMessage();
+        }
+      };
+
+      // --- ログイン画面 ---
+      if (!isLoggedIn) {
+        return (
+          <div className="flex items-center justify-center min-h-screen bg-gray-100">
+            <div className="bg-white p-8 rounded-2xl shadow-lg w-full max-w-sm mx-4">
+              <div className="flex justify-center mb-6">
+                <div className="bg-[#06C755] w-16 h-16 rounded-full flex items-center justify-center text-white">
+                  <i className="fa-solid fa-comment-dots text-3xl"></i>
+                </div>
+              </div>
+              <h1 className="text-2xl font-bold text-center mb-6 text-gray-800">ようこそ</h1>
+              
+              {errorMsg && (
+                  <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4 text-sm">
+                      {errorMsg}
+                  </div>
+              )}
+
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    アカウント名（あなたの名前）を入力してください
+                  </label>
+                  <input
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[#06C755] focus:border-transparent transition-colors"
+                    placeholder="名前を入力..."
+                    autoFocus
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="w-full bg-[#06C755] hover:bg-[#05b34c] disabled:bg-[#a5e8c1] text-white font-bold py-3 px-4 rounded-lg transition-colors flex justify-center items-center h-12"
+                >
+                  {isLoading ? <i className="fa-solid fa-spinner fa-spin"></i> : "はじめる"}
+                </button>
+              </form>
+            </div>
+          </div>
+        );
+      }
+
+      // --- メイン画面 ---
+      return (
+        <div className="flex justify-center min-h-screen bg-gray-200 py-0 sm:py-8">
+          <div className="w-full max-w-md bg-white sm:rounded-[2.5rem] shadow-2xl overflow-hidden flex flex-col relative sm:border-[8px] border-gray-800 h-screen sm:h-[800px]">
+            
+            {/* ホーム画面 */}
+            {currentView === 'home' && (
+              <div className="flex flex-col h-full bg-white">
+                <header className="bg-white border-b border-gray-200 px-4 py-4 sticky top-0 z-10">
+                  <h1 className="text-xl font-bold text-gray-800">ホーム</h1>
+                </header>
+
+                <div className="flex-1 overflow-y-auto">
+                  <div className="p-4 flex items-center space-x-4 border-b border-gray-100">
+                    <div className="bg-gray-200 w-12 h-12 rounded-full flex items-center justify-center text-gray-500">
+                      <i className="fa-solid fa-user text-2xl"></i>
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-bold text-gray-800">{username}</h2>
+                      <p className="text-sm text-gray-500">自分のアカウント</p>
+                    </div>
+                  </div>
+
+                  <div className="p-4 bg-gray-50 border-b border-gray-100">
+                    <h3 className="text-sm font-bold text-gray-500 mb-3">友達を追加</h3>
+                    <form onSubmit={handleAddFriend} className="flex space-x-2">
+                      <input
+                        type="text"
+                        value={newFriendName}
+                        onChange={(e) => setNewFriendName(e.target.value)}
+                        placeholder="友達の名前を入力..."
+                        className="flex-1 border border-gray-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:border-[#06C755] focus:ring-1 focus:ring-[#06C755]"
+                      />
+                      <button
+                        type="submit"
+                        className="bg-[#06C755] text-white p-2 px-4 rounded-full hover:bg-[#05b34c] transition flex items-center space-x-2"
+                      >
+                        <i className="fa-solid fa-user-plus text-sm"></i>
+                        <span className="text-sm font-bold">追加</span>
+                      </button>
+                    </form>
+                  </div>
+
+                  <div className="p-4">
+                    <h3 className="text-sm font-bold text-gray-500 mb-3">
+                      友達リスト {friends.length > 0 && `(${friends.length})`}
+                    </h3>
+                    {friends.length === 0 ? (
+                      <p className="text-gray-400 text-sm text-center py-8">
+                        まだ友達がいません。<br />上の入力欄から追加してみましょう！
+                      </p>
+                    ) : (
+                      <ul className="space-y-1">
+                        {friends.map((friend, index) => (
+                          <li key={index}>
+                            <button
+                              onClick={() => openChat(friend)}
+                              className="w-full flex items-center p-3 rounded-xl hover:bg-gray-100 transition duration-150 text-left space-x-4"
+                            >
+                              <div className="bg-blue-100 w-10 h-10 rounded-full flex items-center justify-center text-blue-500">
+                                <i className="fa-solid fa-user text-xl"></i>
+                              </div>
+                              <span className="text-gray-800 font-medium text-lg flex-1">
+                                {friend}
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* トーク画面 */}
+            {currentView === 'chat' && (
+              <div className="flex flex-col h-full bg-[#7494C0]">
+                <header className="bg-white/95 backdrop-blur-sm px-2 py-3 flex items-center shadow-sm sticky top-0 z-10">
+                  <button
+                    onClick={backToHome}
+                    className="p-2 text-gray-600 hover:bg-gray-100 rounded-full transition w-10 h-10 flex items-center justify-center"
+                  >
+                    <i className="fa-solid fa-chevron-left text-xl"></i>
+                  </button>
+                  <h1 className="text-lg font-bold text-gray-800 ml-2">{activeFriend}</h1>
+                </header>
+
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                  <p className="text-center text-xs text-white/70 mb-4 bg-black/10 mx-auto w-fit px-3 py-1 rounded-full">
+                    {activeFriend} さんとのトークを始めました
+                  </p>
+
+                  {chats.map((msg, index) => {
+                    const isMe = msg.sender === username;
+                    return (
+                      <div
+                        key={index}
+                        className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}
+                      >
+                        {!isMe && (
+                          <div className="w-8 h-8 rounded-full bg-gray-300 flex-shrink-0 mr-2 flex items-center justify-center overflow-hidden mt-1">
+                            <i className="fa-solid fa-user text-gray-500"></i>
+                          </div>
+                        )}
+                        <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[75%]`}>
+                          
+                          <div className={`flex items-end space-x-1 ${isMe ? 'flex-row-reverse space-x-reverse' : 'flex-row'}`}>
+                            
+                            {/* メッセージ本文（画像かテキストか） */}
+                            {msg.image_url ? (
+                              <img 
+                                src={msg.image_url} 
+                                alt="送信された画像" 
+                                className="max-w-[200px] sm:max-w-[250px] rounded-2xl shadow-sm border border-black/10"
+                                onLoad={() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })}
+                              />
+                            ) : (
+                              <div
+                                className={`px-4 py-2 text-[15px] leading-relaxed break-words rounded-2xl ${
+                                  isMe
+                                    ? 'bg-[#85E249] rounded-tr-sm text-gray-800'
+                                    : 'bg-white rounded-tl-sm text-gray-800'
+                                } shadow-sm`}
+                              >
+                                {msg.text}
+                              </div>
+                            )}
+
+                            <span className="text-[10px] text-white/80 pb-1 flex-shrink-0">
+                              {msg.time}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div ref={messagesEndRef} />
+                </div>
+
+                {/* 入力エリア */}
+                <div className="bg-white p-2 border-t border-gray-200">
+                  <div className="flex items-end bg-gray-100 rounded-2xl px-2 py-1">
+                    
+                    {/* 画像アップロードボタン */}
+                    <input 
+                      type="file" 
+                      accept="image/*" 
+                      className="hidden" 
+                      ref={fileInputRef}
+                      onChange={handleImageUpload}
+                    />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isUploading}
+                      className="p-2 mb-1 text-gray-500 hover:text-gray-700 transition w-10 h-10 flex items-center justify-center flex-shrink-0"
+                    >
+                      {isUploading ? (
+                         <i className="fa-solid fa-spinner fa-spin text-lg"></i>
+                      ) : (
+                         <i className="fa-regular fa-image text-xl"></i>
+                      )}
+                    </button>
+
+                    <textarea
+                      value={messageInput}
+                      onChange={(e) => setMessageInput(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      placeholder="メッセージを入力..."
+                      className="flex-1 bg-transparent border-none focus:ring-0 resize-none max-h-32 min-h-[40px] py-2 px-2 text-gray-800 focus:outline-none"
+                      rows={1}
+                    />
+                    
+                    <button
+                      onClick={handleSendMessage}
+                      disabled={!messageInput.trim() || isUploading}
+                      className="p-2 mb-1 text-blue-500 disabled:text-gray-400 hover:text-blue-600 transition w-10 h-10 flex items-center justify-center flex-shrink-0"
+                    >
+                      <i className="fa-solid fa-paper-plane text-xl"></i>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
 </body>
 </html>
