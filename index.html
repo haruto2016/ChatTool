@@ -67,6 +67,9 @@
       const [newGroupName, setNewGroupName] = useState('');
       const [selectedFriends, setSelectedFriends] = useState([]);
       const [previewImage, setPreviewImage] = useState(null); // 画像拡大用
+      
+      // --- 既読者一覧モーダル State ---
+      const [readersList, setReadersList] = useState(null); // 誰が既読したかのリスト（配列）
 
       const messagesEndRef = useRef(null);
       const fileInputRef = useRef(null);
@@ -124,11 +127,9 @@
           .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, (payload) => {
             const newUser = payload.new;
             if (newUser) {
-               // 自分の友達リスト更新
                if (newUser.username === username) {
                  setFriends(newUser.friends || []);
                }
-               // アイコンの更新反映
                if (newUser.avatar_url) {
                  setUserAvatars(prev => ({ ...prev, [newUser.username]: newUser.avatar_url }));
                }
@@ -149,7 +150,7 @@
           })
           .subscribe();
 
-        // 3. 全メッセージの監視（通知 & チャット画面更新用）
+        // 3. 全メッセージの監視（通知 & チャット画面更新用 & 既読更新用）
         const messageChannel = supabase.channel('public:global_messages')
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
             const newMsg = payload.new;
@@ -198,7 +199,6 @@
                   }
 
                   if ('Notification' in window && Notification.permission === 'granted') {
-                     // ファイルか画像かテキストかで通知文言を変える
                      let notificationText = newMsg.text;
                      if (newMsg.image_url) {
                         if (newMsg.text && newMsg.text.startsWith('[FILE]:')) {
@@ -232,6 +232,21 @@
                   }
                }
             }
+          })
+          // 追加: 既読状態などが更新されたとき（UPDATE）の処理
+          .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, (payload) => {
+             const updatedMsg = payload.new;
+             let isCurrentRoom = false;
+             if (activeRoomRef.current) {
+                const currentRoomName = activeRoomRef.current.type === 'direct'
+                   ? [username, activeRoomRef.current.id].sort().join('_')
+                   : activeRoomRef.current.id;
+                if (updatedMsg.room_name === currentRoomName) isCurrentRoom = true;
+             }
+             if (isCurrentRoom) {
+                // 画面上のチャット情報を新しいもの（既読情報含む）に書き換える
+                setChats(prev => prev.map(m => m.id === updatedMsg.id ? updatedMsg : m));
+             }
           })
           .subscribe();
 
@@ -270,6 +285,51 @@
           }, 100);
         }
       }, [chats, activeRoom]);
+
+      // --- ★新機能：自分が未読のメッセージに既読をつける処理 ---
+      const markMessagesAsRead = async () => {
+         if (!activeRoom || !username || chats.length === 0) return;
+         
+         // 自分が送信者ではなく、かつ「read_by」にまだ自分が入っていないメッセージを探す
+         const unreadMessages = chats.filter(msg => msg.sender !== username && !(msg.read_by || []).includes(username));
+         
+         if (unreadMessages.length > 0) {
+            for (const msg of unreadMessages) {
+               const currentReadBy = msg.read_by || [];
+               if (!currentReadBy.includes(username)) {
+                  const updatedReadBy = [...currentReadBy, username];
+                  
+                  // まず画面上ですぐに既読にする（サクサク動かすため）
+                  setChats(prev => prev.map(m => m.id === msg.id ? { ...m, read_by: updatedReadBy } : m));
+                  
+                  // データベースも更新する
+                  try {
+                     await supabase.from('messages').update({ read_by: updatedReadBy }).eq('id', msg.id);
+                  } catch (e) {
+                     console.log("既読の更新に失敗(カラムが存在しない可能性があります)", e);
+                  }
+               }
+            }
+         }
+      };
+
+      // チャットが更新されたり、タブがアクティブになったときに既読をつける
+      useEffect(() => {
+         if (document.visibilityState === 'visible') {
+            markMessagesAsRead();
+         }
+      }, [chats, activeRoom, username]);
+
+      useEffect(() => {
+         const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible') {
+               markMessagesAsRead();
+            }
+         };
+         document.addEventListener("visibilitychange", handleVisibilityChange);
+         return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }, [chats, activeRoom, username]);
+      // -----------------------------------------------------------
 
       // --- ハンドラー ---
       const performLogin = async (name) => {
@@ -404,6 +464,7 @@
           text: messageInput.trim(),
           image_url: null,
           time: timeString,
+          read_by: [username] // ★送信時は自分を既読者に入れておく
         };
 
         setChats(prev => [...prev, newMessage]);
@@ -427,9 +488,7 @@
         setErrorMsg('');
         
         try {
-          // 画像かどうかを判定
           const isImage = file.type.startsWith('image/');
-          
           const fileExt = file.name.split('.').pop();
           const randomString = Math.random().toString(36).substring(2, 12);
           const fileName = `${Date.now()}_${randomString}.${fileExt}`;
@@ -450,10 +509,10 @@
             id: msgId,
             room_name: roomName,
             sender: username,
-            // 画像以外の場合は、ファイル名を含めた特殊なテキストとして保存する
             text: isImage ? null : `[FILE]:${file.name}`,
             image_url: fileUrl,
             time: timeString,
+            read_by: [username] // ★送信時は自分を既読者に入れておく
           };
 
           setChats(prev => [...prev, newMessage]);
@@ -485,15 +544,13 @@
            
            const { data: { publicUrl } } = supabase.storage.from('chat-images').getPublicUrl(fileName);
            
-           // DBの更新（avatar_urlカラムが必要）
            const { error: dbError } = await supabase.from('users').update({ avatar_url: publicUrl }).eq('username', username);
            
            if (dbError) {
-              console.warn("アバターのDB保存に失敗しました(SQLの設定を行っていない可能性があります)", dbError);
+              console.warn("アバターのDB保存に失敗", dbError);
               alert("アイコンを一時的に変更しました。次回以降も反映させるには、SQLの設定が必要です。");
            }
            
-           // 画面上の見た目を更新
            setUserAvatars(prev => ({...prev, [username]: publicUrl}));
            
         } catch (error) {
@@ -576,8 +633,6 @@
             {/* サイドバーヘッダー */}
             <div className="p-4 bg-white border-b border-gray-200 flex justify-between items-center z-10">
               <div className="flex items-center space-x-3">
-                
-                {/* 自分のアイコン（クリックで変更可能） */}
                 <div 
                   className="relative group cursor-pointer shadow-sm rounded-full" 
                   onClick={() => avatarInputRef.current?.click()}
@@ -591,7 +646,6 @@
                        <i className="fa-solid fa-user"></i>
                     </div>
                   )}
-                  {/* ホバー時のカメラアイコン */}
                   <div className="absolute inset-0 bg-black/40 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                     {isAvatarUploading ? <i className="fa-solid fa-spinner fa-spin text-white text-sm"></i> : <i className="fa-solid fa-camera text-white text-sm"></i>}
                   </div>
@@ -686,7 +740,6 @@
                          onClick={() => setActiveRoom({ type: 'direct', id: friend, name: friend })}
                          className={`flex-1 flex items-center p-2 rounded-lg transition text-left ${activeRoom?.id === friend ? 'bg-[#06C755]/10 text-[#06C755]' : 'hover:bg-gray-200 text-gray-700'}`}
                        >
-                         {/* 友達のアイコンを表示 */}
                          {userAvatars[friend] ? (
                             <img src={userAvatars[friend]} className="w-8 h-8 rounded-full object-cover mr-3 flex-shrink-0 shadow-sm" />
                          ) : (
@@ -714,7 +767,6 @@
           {/* 右メインエリア (トーク画面) */}
           <div className="flex-1 flex flex-col bg-[#7494C0] relative">
              {activeRoom ? (
-                // 選択中のトーク画面
                 <div className="flex flex-col h-full">
                    {/* チャットヘッダー */}
                    <header className="bg-white/95 backdrop-blur-sm px-6 py-4 flex items-center shadow-sm sticky top-0 z-10">
@@ -753,6 +805,11 @@
                         // 画像かどうかを判定
                         const isImage = msg.image_url && !isFile;
 
+                        // ★ 既読の判定
+                        // 自分以外の既読者リストを作る
+                        const readByOthers = (msg.read_by || []).filter(u => u !== username);
+                        const readCount = readByOthers.length;
+
                         return (
                           <div key={index} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
                             {!isMe && (
@@ -769,7 +826,6 @@
                             
                             <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[65%]`}>
                               
-                              {/* 相手の場合＆グループの場合のみ、名前を表示する */}
                               {!isMe && activeRoom.type === 'group' && (
                                 <span className="text-xs text-white/80 mb-1 ml-1">{msg.sender}</span>
                               )}
@@ -814,7 +870,25 @@
                                     ))}
                                   </div>
                                 )}
-                                <span className="text-[11px] text-white/80 pb-1 flex-shrink-0">{msg.time}</span>
+                                
+                                {/* ★ 既読マークと時間の表示 */}
+                                <div className={`flex flex-col text-[11px] text-white/80 pb-0.5 flex-shrink-0 ${isMe ? 'items-end ml-1.5' : 'items-start mr-1.5'}`}>
+                                  {isMe && readCount > 0 && (
+                                     activeRoom.type === 'group' ? (
+                                       <button 
+                                         onClick={() => setReadersList(readByOthers)}
+                                         className="hover:underline hover:text-blue-100 font-bold mb-0.5 leading-none transition-colors"
+                                         title="誰が読んだか確認する"
+                                       >
+                                         既読 {readCount}
+                                       </button>
+                                     ) : (
+                                       <span className="font-bold mb-0.5 leading-none">既読</span>
+                                     )
+                                  )}
+                                  <span className="leading-none">{msg.time}</span>
+                                </div>
+
                               </div>
                             </div>
                           </div>
@@ -827,7 +901,6 @@
                    <div className="bg-white p-4 border-t border-gray-200">
                       <div className="flex items-end bg-gray-100 rounded-xl px-3 py-2 border border-transparent focus-within:border-gray-300 focus-within:bg-white transition-colors">
                         
-                        {/* 添付ファイルボタン (画像以外もOKにするため accept 属性を削除) */}
                         <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileUpload} />
                         <button
                           onClick={() => fileInputRef.current?.click()}
@@ -858,7 +931,6 @@
                    </div>
                 </div>
              ) : (
-                // 選択されていない時
                 <div className="flex-1 flex flex-col items-center justify-center text-white/60">
                    <div className="bg-white/10 w-32 h-32 rounded-full flex items-center justify-center mb-6">
                      <i className="fa-regular fa-comments text-6xl"></i>
@@ -884,9 +956,37 @@
                 src={previewImage} 
                 alt="拡大画像" 
                 className="max-w-full max-h-full object-contain cursor-default rounded shadow-2xl"
-                onClick={(e) => e.stopPropagation()} /* 画像クリックで閉じないようにする */
+                onClick={(e) => e.stopPropagation()}
               />
             </div>
+          )}
+
+          {/* ★既読者一覧モーダル */}
+          {readersList && (
+             <div className="fixed inset-0 z-[100] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 animate-[fadeIn_0.2s_ease-out]">
+                <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+                   <div className="flex justify-between items-center p-4 border-b border-gray-100 bg-gray-50">
+                      <h3 className="text-[15px] font-bold text-gray-800">既読した人 ({readersList.length})</h3>
+                      <button onClick={() => setReadersList(null)} className="text-gray-400 hover:text-gray-600 transition bg-white w-8 h-8 rounded-full shadow-sm flex items-center justify-center">
+                         <i className="fa-solid fa-xmark"></i>
+                      </button>
+                   </div>
+                   <div className="p-3 overflow-y-auto space-y-1">
+                      {readersList.map(reader => (
+                         <div key={reader} className="flex items-center p-2.5 hover:bg-gray-100 rounded-xl transition">
+                            {userAvatars[reader] ? (
+                               <img src={userAvatars[reader]} className="w-10 h-10 rounded-full object-cover mr-3 shadow-sm" />
+                            ) : (
+                               <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center mr-3 shadow-sm">
+                                  <i className="fa-solid fa-user text-gray-500 text-sm"></i>
+                               </div>
+                            )}
+                            <span className="text-[15px] text-gray-800 font-medium">{reader}</span>
+                         </div>
+                      ))}
+                   </div>
+                </div>
+             </div>
           )}
 
           {/* グループ作成モーダル */}
@@ -929,7 +1029,6 @@
                             }}
                             className="w-4 h-4 rounded text-[#06C755] focus:ring-[#06C755] border-gray-300"
                           />
-                          {/* モーダル内のアイコン表示 */}
                           {userAvatars[f] ? (
                             <img src={userAvatars[f]} className="w-6 h-6 rounded-full object-cover" />
                           ) : (
