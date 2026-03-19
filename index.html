@@ -19,7 +19,7 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <!-- Supabase SDK -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
 </head>
 <body class="bg-gray-100 overflow-hidden">
   <div id="root"></div>
@@ -31,17 +31,20 @@
     // データベース設定
     // ==========================================
     
+    // Supabaseの初期化関数を取得 (名前の衝突を避けるための修正)
+    const createClient = window.supabase.createClient;
+
     // 1. メインDB (メッセージ、プロフィール、友達用)
     const MAIN_SUPABASE_URL = "https://esmxetaqzojcitpnmbws.supabase.co";
     const MAIN_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVzbXhldGFxem9qY2l0cG5tYndzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMyMDM2ODIsImV4cCI6MjA4ODc3OTY4Mn0.Bq9lgljH0-1nynLi6IEa_Jkz8sNPIYozjXIknznK-Rs";
-    const supabase = window.supabase.createClient(MAIN_SUPABASE_URL, MAIN_SUPABASE_ANON_KEY);
+    const supabase = createClient(MAIN_SUPABASE_URL, MAIN_SUPABASE_ANON_KEY);
 
     // 2. 認証用DB (ユーザー名とパスワード保存用)
     const AUTH_SUPABASE_URL = "https://qptbwwnanzpiggdrepyv.supabase.co";
     const AUTH_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFwdGJ3d25hbnpwaWdnZHJlcHl2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM4OTg2MzgsImV4cCI6MjA4OTQ3NDYzOH0.8a5-qC8DL9TlrY_7w-eLk-3tpIJI_npohDOIkiKS9a0"; 
     
     // 認証用DBのクライアント作成
-    const authSupabase = window.supabase.createClient(AUTH_SUPABASE_URL, AUTH_SUPABASE_ANON_KEY);
+    const authSupabase = createClient(AUTH_SUPABASE_URL, AUTH_SUPABASE_ANON_KEY);
 
     // ==========================================
 
