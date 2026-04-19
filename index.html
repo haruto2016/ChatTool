@@ -1,13 +1,196 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LINE Clone Chat Application</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Supabase -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <!-- PeerJS -->
+    <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <!-- QRCode -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <!-- Html5 QR Code Scanner -->
+    <script src="https://unpkg.com/html5-qrcode"></script>
+</head>
+<body>
+    <!-- Auth Screen -->
+    <div id="auth-screen" class="screen">
+        <div class="auth-panel">
+            <div class="app-logo">💬</div>
+            <h2>LINE Chat Clone</h2>
+            <div class="tabs">
+                <button class="tab-btn active" id="tab-login" onclick="ui.switchAuthTab('login')">ログイン</button>
+                <button class="tab-btn" id="tab-register" onclick="ui.switchAuthTab('register')">新規登録</button>
+            </div>
+            <form onsubmit="ui.handleAuthSubmit(event)">
+                <div class="input-group">
+                    <input type="text" id="auth-name" placeholder="ユーザー名" required>
+                </div>
+                <div class="input-group">
+                    <input type="password" id="auth-password" placeholder="パスワード" required>
+                </div>
+                <div class="input-group hidden" id="profile-upload-group">
+                    <label>プロフィール画像</label>
+                    <input type="file" id="auth-avatar" accept="image/*">
+                </div>
+                <button type="submit" class="primary-btn"><span id="auth-btn-text">ログイン</span></button>
+            </form>
+        </div>
+    </div>
 
+    <!-- Main App Screen -->
+    <div id="app-screen" class="screen hidden">
+        <div class="main-app">
+            <!-- Side Navigation -->
+            <div class="side-nav">
+                <div class="nav-links">
+                    <button class="nav-btn" onclick="ui.showAddFriendPrompt()">➕</button>
+                    <button class="nav-btn" onclick="ui.showMyQR()">📱</button>
+                    <button class="nav-btn" onclick="ui.openAdminMenu()">⚙️</button>
+                </div>
+                <div class="nav-bottom">
+                    <div class="my-avatar">
+                        <img src="" alt="My Avatar">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chat Sidebar -->
+            <div class="chat-sidebar">
+                <div class="sidebar-tabs">
+                    <button class="tab-btn active" onclick="ui.switchSidebarTab('chats')">すべて</button>
+                    <button class="tab-btn" onclick="ui.switchSidebarTab('friends')">友達</button>
+                    <button class="tab-btn" onclick="ui.switchSidebarTab('groups')">グループ</button>
+                </div>
+                <div class="search-container">
+                    <div class="search-bar">
+                        <span>🔍</span>
+                        <input type="text" id="sidebar-search" placeholder="検索" oninput="ui.handleSidebarSearch()">
+                    </div>
+                </div>
+                <div class="chat-list" id="chat-list"></div>
+            </div>
+
+            <!-- Chat Area -->
+            <div class="chat-area">
+                <div id="chat-placeholder">
+                    <div class="line-watermark">LINE</div>
+                </div>
+                <div id="chat-main-area" class="hidden" style="display: flex; flex-direction: column; flex: 1;">
+                    <div class="chat-header">
+                        <div class="active-contact">
+                            <img id="header-avatar" src="" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;">
+                            <span id="header-name"></span>
+                        </div>
+                        <button class="nav-btn" onclick="ui.backToSidebar()">←</button>
+                    </div>
+                    <div class="messages-container" id="messages-container"></div>
+                    <div class="composer-container">
+                        <div class="input-wrapper">
+                            <textarea id="message-input" placeholder="メッセージを入力..." onkeypress="ui.handleEnterPress(event)"></textarea>
+                            <div class="composer-footer">
+                                <div style="display: flex; gap: 8px;">
+                                    <button class="nav-btn" onclick="document.getElementById('file-upload').click()">📎</button>
+                                    <button class="nav-btn" onclick="ui.toggleStampPicker()">😊</button>
+                                </div>
+                                <button class="nav-btn" onclick="ui.sendMessage()">送信</button>
+                            </div>
+                        </div>
+                        <div id="stamp-picker" class="stamp-picker hidden"></div>
+                        <input type="file" id="file-upload" style="display: none;" onchange="ui.handleFileUpload(event)">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Friend/Group Modal -->
+    <div id="add-friend-modal" class="modal hidden">
+        <div class="modal-panel">
+            <div class="modal-header">
+                <h3>追加</h3>
+                <button class="close-btn" onclick="ui.closeAddFriendModal()">✕</button>
+            </div>
+            <div class="modal-tabs">
+                <button class="tab-btn active" id="tab-add-friend" onclick="ui.switchAddTab('friend')">友達を追加</button>
+                <button class="tab-btn" id="tab-add-group" onclick="ui.switchAddTab('group')">グループを作成</button>
+                <button class="tab-btn" id="tab-add-qr" onclick="ui.switchAddTab('qr')">QRコード</button>
+                <button class="tab-btn" id="tab-add-requests" onclick="ui.switchAddTab('requests')">
+                    リクエスト <span id="request-badge" class="hidden" style="background: red; color: white; border-radius: 50%; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; font-size: 12px;"></span>
+                </button>
+            </div>
+
+            <!-- Friend Form -->
+            <div id="form-add-friend" class="hidden">
+                <div class="input-group">
+                    <input type="text" id="search-username" placeholder="ユーザー名を入力">
+                </div>
+                <button class="primary-btn" onclick="ui.handleAddFriendOrGroup()">追加</button>
+            </div>
+
+            <!-- Group Form -->
+            <div id="form-add-group" class="hidden">
+                <div class="input-group">
+                    <input type="text" id="group-name" placeholder="グループ名">
+                </div>
+                <div class="input-group">
+                    <textarea id="group-members" placeholder="メンバーをカンマで区切って入力（例：user1, user2）"></textarea>
+                </div>
+                <button class="primary-btn" onclick="ui.handleAddFriendOrGroup()">作成</button>
+            </div>
+
+            <!-- QR Code Forms -->
+            <div id="form-qr" class="hidden">
+                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                    <button class="tab-btn active" id="qr-sub-my" onclick="ui.switchQRSubTab('my')">自分のQRコード</button>
+                    <button class="tab-btn" id="qr-sub-scan" onclick="ui.switchQRSubTab('scan')">スキャン</button>
+                </div>
+                <div id="my-qr-display">
+                    <div id="qrcode" style="text-align: center; padding: 20px;"></div>
+                </div>
+                <div id="qr-scanner-view" class="hidden">
+                    <div id="reader" style="width: 100%; height: 300px;"></div>
+                </div>
+            </div>
+
+            <!-- Requests List -->
+            <div id="form-requests" class="hidden">
+                <div id="pending-requests-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Modal -->
+    <div id="admin-modal" class="modal hidden">
+        <div class="modal-panel">
+            <div class="modal-header">
+                <h3>プロフィール</h3>
+                <button class="close-btn" onclick="document.getElementById('admin-modal').classList.add('hidden')">✕</button>
+            </div>
+            <div style="text-align: center; padding: 20px;">
+                <img id="admin-avatar" src="" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover; margin-bottom: 15px;">
+                <p id="admin-username" style="font-weight: bold; margin-bottom: 20px;"></p>
+                <button class="primary-btn" onclick="ui.logout()">ログアウト</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Call Screen -->
+    <div id="call-screen" class="modal hidden">
+        <div style="background: black; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;">
+            <video id="remote-video" style="width: 400px; height: 300px; background: #333; border-radius: 8px;"></video>
+            <video id="local-video" style="width: 200px; height: 150px; background: #333; border-radius: 8px;"></video>
+            <p id="remote-name" style="color: white; font-size: 18px;"></p>
+            <div style="display: flex; gap: 10px;">
+                <button class="nav-btn" style="color: white;" id="mic-btn" onclick="WebRTC.toggleMic(this)">🎤</button>
+                <button class="nav-btn" style="color: white;" id="video-btn" onclick="WebRTC.toggleVideo(this)">📹</button>
+                <button class="nav-btn" style="color: red;" onclick="WebRTC.endCall()">❌</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
