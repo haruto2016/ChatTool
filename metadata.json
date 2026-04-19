@@ -1,0 +1,6 @@
+{
+  "name": "LINE Clone Premium",
+  "description": "A high-fidelity LINE clone with real-time messaging, friend requests, and video calls via Supabase and PeerJS.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": []
+}
